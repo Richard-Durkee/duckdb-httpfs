@@ -1,0 +1,46 @@
+# name: test/sql/skip_head_with_file_size.test
+# description: A file struct that supplies the file size is read without a HEAD request
+# group: [sql]
+
+require httpfs
+
+require-env PYTHON_HTTP_SERVER_URL
+
+require-env PYTHON_HTTP_SERVER_DIR
+
+statement ok
+CALL enable_logging('HTTP');
+
+# ten rows of one digit and a newline: 20 bytes
+statement ok
+COPY (SELECT i FROM range(10) t(i)) TO '{PYTHON_HTTP_SERVER_DIR}/head_skip.csv' (FORMAT CSV, HEADER false);
+
+# a plain path has to ask for the file size first
+query I
+SELECT sum(i) FROM read_csv('{PYTHON_HTTP_SERVER_URL}/head_skip.csv', header = false, columns = {'i': 'INTEGER'})
+----
+45
+
+query I
+SELECT count(*) > 0 FROM duckdb_logs_parsed('HTTP') WHERE request.type = 'HEAD' AND request.url LIKE '%head_skip.csv'
+----
+true
+
+statement ok
+CALL truncate_duckdb_logs();
+
+# with the size in the file struct the reads start right away
+query I
+SELECT sum(i) FROM read_csv([{'filename': '{PYTHON_HTTP_SERVER_URL}/head_skip.csv', 'file_size': 20}], header = false, columns = {'i': 'INTEGER'})
+----
+45
+
+query I
+SELECT count(*) FROM duckdb_logs_parsed('HTTP') WHERE request.type = 'HEAD' AND request.url LIKE '%head_skip.csv'
+----
+0
+
+query I
+SELECT count(*) > 0 FROM duckdb_logs_parsed('HTTP') WHERE request.type = 'GET' AND request.url LIKE '%head_skip.csv'
+----
+true

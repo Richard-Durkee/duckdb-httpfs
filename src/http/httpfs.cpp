@@ -265,9 +265,9 @@ HTTPFileHandle::HTTPFileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpe
 		if (force_full_download_entry != info.end()) {
 			force_full_download = force_full_download_entry->second.GetValue<bool>();
 		}
-		if (lm_entry != info.end() && etag_entry != info.end() && fs_entry != info.end()) {
-			// we found all relevant entries (last_modified, etag and file size)
-			// skip head request
+		if (fs_entry != info.end()) {
+			// the file size is all a range request needs, so skip the head request. Without an etag the reads carry
+			// no If-Match condition and without last_modified the external file cache cannot validate its blocks
 			initialized = true;
 		}
 	}
