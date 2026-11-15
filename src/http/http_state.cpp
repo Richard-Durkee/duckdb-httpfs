@@ -143,6 +143,72 @@ void HTTPState::Reset() {
 	file_states.clear();
 }
 
+static const string REQUESTS_METRIC = "httpfs.requests";
+static const string RETRIES_METRIC = "httpfs.retries";
+static const string REQUEST_TIME_METRIC = "httpfs.request_time";
+
+void HTTPState::RegisterMetrics(ExtensionLoader &loader) {
+	loader.RegisterMetric(
+	    {REQUESTS_METRIC, "uint64", "HTTP requests sent, every attempt counted and retries included", "requests"});
+	loader.RegisterMetric({RETRIES_METRIC, "uint64",
+	                       "HTTP requests sent again after an earlier attempt of the same operation, also counted in "
+	                       "httpfs.requests",
+	                       "requests"});
+	loader.RegisterMetric({REQUEST_TIME_METRIC, "double",
+	                       "Time spent in HTTP requests, added up over all threads and attempts", "seconds"});
+}
+
+void HTTPState::AttachToQuery(ClientContext &context) {
+	if (!QueryProfiler::Get(context).IsEnabled()) {
+		return;
+	}
+	shared_ptr<ClientContext> shared_context;
+	try {
+		shared_context = context.shared_from_this();
+	} catch (...) { // NOLINT: a context that is not shared cannot be profiled through us
+		return;
+	}
+	annotated_lock_guard<annotated_mutex> guard(profiled_context_lock);
+	profiled_context = std::move(shared_context);
+	profiling = true;
+}
+
+void HTTPState::DetachFromQuery() {
+	annotated_lock_guard<annotated_mutex> guard(profiled_context_lock);
+	profiling = false;
+	profiled_context.reset();
+}
+
+shared_ptr<ClientContext> HTTPState::GetProfiledContext() {
+	annotated_lock_guard<annotated_mutex> guard(profiled_context_lock);
+	return profiled_context.lock();
+}
+
+void HTTPState::RecordRequestMetrics(idx_t elapsed_ns) {
+	// A strong reference, so that the context cannot go away while its profiler is in use
+	auto context = GetProfiledContext();
+	if (!context) {
+		return;
+	}
+	try {
+		auto &profiler = QueryProfiler::Get(*context);
+		profiler.AddToMetricCounter(REQUESTS_METRIC, 1);
+		profiler.AddToMetricTiming(REQUEST_TIME_METRIC, elapsed_ns);
+	} catch (...) { // NOLINT: a lost figure must not fail the request
+	}
+}
+
+void HTTPState::RecordRetryMetric() {
+	auto context = GetProfiledContext();
+	if (!context) {
+		return;
+	}
+	try {
+		QueryProfiler::Get(*context).AddToMetricCounter(RETRIES_METRIC, 1);
+	} catch (...) { // NOLINT: a lost figure must not fail the request
+	}
+}
+
 void HTTPState::RecordRequest(RequestType request_type) {
 	switch (request_type) {
 	case RequestType::HEAD_REQUEST:
@@ -194,7 +260,11 @@ bool HTTPState::IsEmpty() const {
 }
 
 shared_ptr<HTTPState> HTTPState::TryGetState(ClientContext &context) {
-	return context.registered_state->GetOrCreate<HTTPState>("http_state");
+	auto state = context.registered_state->GetOrCreate<HTTPState>("http_state");
+	if (!state->IsProfiling()) {
+		state->AttachToQuery(context);
+	}
+	return state;
 }
 
 shared_ptr<HTTPState> HTTPState::TryGetState(optional_ptr<FileOpener> opener) {

@@ -155,6 +155,7 @@ public:
 
 	unique_ptr<HTTPResponse> Get(GetRequestInfo &info) override {
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
+		HTTPRequestTimer request_timer(state);
 		if (state) {
 			state->RecordRequest(RequestType::GET_REQUEST);
 		}
@@ -171,6 +172,7 @@ public:
 	}
 	unique_ptr<HTTPResponse> Put(PutRequestInfo &info) override {
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
+		HTTPRequestTimer request_timer(state);
 		if (state) {
 			state->RecordRequest(RequestType::PUT_REQUEST);
 			state->RecordBytesSent(info.buffer_in_len);
@@ -193,6 +195,7 @@ public:
 
 	unique_ptr<HTTPResponse> Head(HeadRequestInfo &info) override {
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
+		HTTPRequestTimer request_timer(state);
 		if (state) {
 			state->RecordRequest(RequestType::HEAD_REQUEST);
 		}
@@ -202,6 +205,7 @@ public:
 
 	unique_ptr<HTTPResponse> Delete(DeleteRequestInfo &info) override {
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
+		HTTPRequestTimer request_timer(state);
 		if (state) {
 			state->RecordRequest(RequestType::DELETE_REQUEST);
 		}
@@ -210,6 +214,7 @@ public:
 	}
 
 	unique_ptr<HTTPResponse> Options(OptionsRequestInfo &info) override {
+		HTTPRequestTimer request_timer(state);
 		if (state) {
 			state->RecordRequest(RequestType::OPTIONS_REQUEST);
 		}
@@ -219,6 +224,7 @@ public:
 
 	unique_ptr<HTTPResponse> Post(PostRequestInfo &info) override {
 		AddUserAgentIfAvailable(info.params.Cast<HTTPFSParams>(), info.headers);
+		HTTPRequestTimer request_timer(state);
 		if (state) {
 			state->RecordRequest(RequestType::POST_REQUEST);
 			state->RecordBytesSent(info.buffer_in_len);

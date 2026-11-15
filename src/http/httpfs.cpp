@@ -62,6 +62,19 @@ bool HTTPFSUtil::ShouldRetry(const BaseRequest &request, const HTTPResponse &res
 	return HTTPUtil::ShouldRetry(request, response) || S3RequestUtil::IsRequestTimeout(response);
 }
 
+void HTTPFSUtil::PrepareAttempt(BaseRequest &request, idx_t attempt, idx_t max_attempts) {
+	HTTPUtil::PrepareAttempt(request, attempt, max_attempts);
+#ifndef __EMSCRIPTEN__
+	// The wasm client does not record its requests, so it must not record retries of them either
+	if (attempt > 1) {
+		auto &state = request.params.Cast<HTTPFSParams>().state;
+		if (state && state->IsProfiling()) {
+			state->RecordRetryMetric();
+		}
+	}
+#endif
+}
+
 struct HTTPParametersInitializer {
 private:
 	HTTPParametersInitializer(HTTPUtil &http_util, optional_ptr<FileOpener> opener_p,

@@ -1,0 +1,140 @@
+# name: test/sql/s3/profiling_metrics.test
+# description: The httpfs.* query profile metrics count the requests of a profiled S3 query
+# group: [s3]
+
+require-env S3_TEST_SERVER_AVAILABLE 1
+
+require-env AWS_DEFAULT_REGION
+
+require-env AWS_ACCESS_KEY_ID
+
+require-env AWS_SECRET_ACCESS_KEY
+
+require-env DUCKDB_S3_ENDPOINT
+
+require-env DUCKDB_S3_USE_SSL
+
+require httpfs
+
+require parquet
+
+require json
+
+statement ok
+set s3_use_ssl='{DUCKDB_S3_USE_SSL}'
+
+statement ok
+set s3_endpoint='{DUCKDB_S3_ENDPOINT}'
+
+statement ok
+set s3_region='{AWS_DEFAULT_REGION}'
+
+statement ok
+CREATE SECRET s1 (TYPE S3, KEY_ID '{AWS_ACCESS_KEY_ID}', SECRET '{AWS_SECRET_ACCESS_KEY}')
+
+statement ok
+SET threads = 4;
+
+# A write that is not profiled must not fail
+statement ok
+COPY (SELECT range AS i, range::VARCHAR AS s FROM range(200000)) TO 's3://test-bucket/profiling_metrics/a.parquet'
+
+statement ok
+COPY (SELECT range AS i, range::VARCHAR AS s FROM range(200000, 400000)) TO 's3://test-bucket/profiling_metrics/b.parquet'
+
+statement ok
+COPY (SELECT range AS i, range::VARCHAR AS s FROM range(400000, 600000)) TO 's3://test-bucket/profiling_metrics/c.parquet'
+
+# A read that is not profiled must not fail either
+query I
+SELECT count(*) FROM 's3://test-bucket/profiling_metrics/a.parquet'
+----
+200000
+
+statement ok
+SET enable_profiling = 'json';
+
+statement ok
+SET profiling_output = '{TEST_DIR}/profiling_metrics_read.json';
+
+# Read several files with several threads
+query I
+SELECT count(*) FROM read_parquet(['s3://test-bucket/profiling_metrics/a.parquet', 's3://test-bucket/profiling_metrics/b.parquet', 's3://test-bucket/profiling_metrics/c.parquet'])
+----
+600000
+
+statement ok
+SET enable_profiling = 'no_output';
+
+statement ok
+CREATE TABLE read_profile AS SELECT * FROM read_json('{TEST_DIR}/profiling_metrics_read.json');
+
+# A HEAD and a GET per file, except the file an earlier query read: three HEADs alone cannot reach this, so the GETs
+# have to be counted as well
+query I
+SELECT httpfs.requests >= 4 FROM read_profile
+----
+true
+
+query I
+SELECT httpfs.request_time > 0 FROM read_profile
+----
+true
+
+# Writes are requests as well
+statement ok
+SET enable_profiling = 'json';
+
+statement ok
+SET profiling_output = '{TEST_DIR}/profiling_metrics_write.json';
+
+statement ok
+COPY (SELECT range AS i, range::VARCHAR AS s FROM range(200000)) TO 's3://test-bucket/profiling_metrics/d.parquet'
+
+statement ok
+SET enable_profiling = 'no_output';
+
+statement ok
+CREATE TABLE write_profile AS SELECT * FROM read_json('{TEST_DIR}/profiling_metrics_write.json');
+
+query I
+SELECT httpfs.requests > 0 AND httpfs.request_time > 0 FROM write_profile
+----
+true
+
+# A connection whose first query is the profiled one creates its HTTP state while that query runs
+restart
+
+statement ok
+set s3_use_ssl='{DUCKDB_S3_USE_SSL}'
+
+statement ok
+set s3_endpoint='{DUCKDB_S3_ENDPOINT}'
+
+statement ok
+set s3_region='{AWS_DEFAULT_REGION}'
+
+statement ok
+CREATE SECRET s2 (TYPE S3, KEY_ID '{AWS_ACCESS_KEY_ID}', SECRET '{AWS_SECRET_ACCESS_KEY}')
+
+statement ok
+SET enable_profiling = 'json';
+
+statement ok
+SET profiling_output = '{TEST_DIR}/profiling_metrics_fresh.json';
+
+query I
+SELECT sum(i) FROM 's3://test-bucket/profiling_metrics/a.parquet'
+----
+19999900000
+
+statement ok
+SET enable_profiling = 'no_output';
+
+statement ok
+CREATE TABLE fresh_profile AS SELECT * FROM read_json('{TEST_DIR}/profiling_metrics_fresh.json');
+
+query I
+SELECT httpfs.requests >= 2 FROM fresh_profile
+----
+true

@@ -1,0 +1,39 @@
+# name: test/sql/profiling_metrics.test
+# description: The httpfs.* query profile metrics are registered and a non-profiled query is unaffected
+# group: [sql]
+
+require httpfs
+
+require json
+
+query III
+SELECT metric_name, metric_type, unit FROM duckdb_available_metrics() WHERE metric_name LIKE 'httpfs.%' ORDER BY metric_name
+----
+httpfs.request_time	double	seconds
+httpfs.requests	uint64	requests
+httpfs.retries	uint64	requests
+
+# The metrics can be tracked by name
+statement ok
+SET tracked_metrics = ['httpfs.requests', 'httpfs.retries', 'httpfs.request_time'];
+
+statement ok
+RESET tracked_metrics;
+
+# Queries that do not touch the network leave the metrics out of the profile
+statement ok
+SET enable_profiling = 'json';
+
+statement ok
+SET profiling_output = '{TEST_DIR}/profiling_metrics_no_http.json';
+
+statement ok
+SELECT count(*) FROM range(1000);
+
+statement ok
+SET enable_profiling = 'no_output';
+
+query I
+SELECT count(*) FROM read_text('{TEST_DIR}/profiling_metrics_no_http.json') WHERE content LIKE '%httpfs%'
+----
+0

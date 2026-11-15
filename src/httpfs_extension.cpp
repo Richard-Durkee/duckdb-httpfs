@@ -1,4 +1,5 @@
 #include "httpfs_extension.hpp"
+#include "http/http_state.hpp"
 #include "http/httpfs_client.hpp"
 #include "http/http_settings.hpp"
 #include "create_secret_functions.hpp"
@@ -55,6 +56,7 @@ struct HTTPFSExtensionLoader {
 
 		instance.GetLogManager().RegisterLogType(make_uniq<HTTPFSInfoLogType>());
 		RegisterFileSystems(instance);
+		HTTPState::RegisterMetrics(loader);
 	}
 };
 

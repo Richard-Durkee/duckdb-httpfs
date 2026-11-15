@@ -105,6 +105,8 @@ public:
 	void LogRequest(BaseRequest &request, optional_ptr<HTTPResponse> response) override;
 	//! S3's 400 RequestTimeout is retryable; core only knows the generic statuses.
 	bool ShouldRetry(const BaseRequest &request, const HTTPResponse &response) override;
+	//! Counts every attempt after the first in the httpfs.retries profile metric.
+	void PrepareAttempt(BaseRequest &request, idx_t attempt, idx_t max_attempts) override;
 	HTTPTransportReusePolicy GetTransportReusePolicy() const override;
 
 	static HTTPUtil &GetHTTPUtil(optional_ptr<FileOpener> opener);

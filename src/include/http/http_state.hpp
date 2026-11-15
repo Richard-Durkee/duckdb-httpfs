@@ -10,7 +10,9 @@
 #include "duckdb/common/atomic.hpp"
 #include "duckdb/common/optional_ptr.hpp"
 #include "duckdb/main/client_context_state.hpp"
+#include "duckdb/main/extension/extension_loader.hpp"
 
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 
@@ -241,6 +243,8 @@ class HTTPState : public ClientContextState {
 public:
 	//! Reset all counters and per-path state
 	void Reset();
+	//! Registers the httpfs.* query profile metrics
+	static void RegisterMetrics(ExtensionLoader &loader);
 	//! Record request and transfer statistics
 	void RecordRequest(RequestType request_type);
 	void RecordBytesReceived(idx_t byte_count);
@@ -256,14 +260,34 @@ public:
 	static shared_ptr<HTTPState> TryGetState(ClientContext &context);
 	static shared_ptr<HTTPState> TryGetState(optional_ptr<FileOpener> opener);
 
-	//! Called by the ClientContext when the current query ends
+	//! True while the running query is profiled, so that requests only measure their time then
+	bool IsProfiling() const {
+		return profiling.load(std::memory_order_relaxed);
+	}
+	//! Adds one request that took the given time to the query profile
+	void RecordRequestMetrics(idx_t elapsed_ns);
+	//! Adds a request that is sent again after an earlier attempt of the same operation to the query profile
+	void RecordRetryMetric();
+
+	//! Called by the ClientContext when the current query begins and ends
+	void QueryBegin(ClientContext &context) override {
+		AttachToQuery(context);
+	}
 	void QueryEnd(ClientContext &context) override {
+		DetachFromQuery();
 		Reset();
 	}
 	void WriteProfilingInformation(std::ostream &ss) override;
 	bool RunCredentialRefresh(const std::function<bool()> &callback) DUCKDB_EXCLUDES(credential_refresh_mutex);
 
 private:
+	//! Starts adding metrics to the profile of the query this context runs, if it is profiled. The state can be
+	//! created after QueryBegin ran, so the lookup of the state attaches as well.
+	void AttachToQuery(ClientContext &context) DUCKDB_EXCLUDES(profiled_context_lock);
+	void DetachFromQuery() DUCKDB_EXCLUDES(profiled_context_lock);
+	//! The context whose profile receives the metrics, or null when the query is not profiled
+	shared_ptr<ClientContext> GetProfiledContext() DUCKDB_EXCLUDES(profiled_context_lock);
+
 	//! Request and transfer statistics
 	atomic<idx_t> head_count {0};
 	atomic<idx_t> get_count {0};
@@ -274,6 +298,16 @@ private:
 	atomic<idx_t> total_bytes_received {0};
 	atomic<idx_t> total_bytes_sent {0};
 
+	//! Whether profiled_context is set, readable without taking the lock
+	atomic<bool> profiling {false};
+	//! Guards profiled_context
+	annotated_mutex profiled_context_lock;
+	//! The context that runs the profiled query. It is weak because file handles keep the state alive after their
+	//! connection is gone. A state belongs to one connection, but a file handle keeps the state of the connection that
+	//! opened it, so the requests of another connection that uses the handle are added to the query the opening
+	//! connection is running, or dropped when it is idle.
+	weak_ptr<ClientContext> profiled_context DUCKDB_GUARDED_BY(profiled_context_lock);
+
 private:
 	//! Serializes credential provider refreshes after auth failures.
 	annotated_mutex credential_refresh_mutex;
@@ -282,6 +316,30 @@ private:
 	annotated_mutex file_states_mutex;
 	//! Per-path state shared by all file handles in this query
 	unordered_map<string, shared_ptr<HTTPFileState>> file_states DUCKDB_GUARDED_BY(file_states_mutex);
+};
+
+//! Adds the time between its creation and destruction to the profile as one request, if the query is profiled
+class HTTPRequestTimer {
+public:
+	explicit HTTPRequestTimer(optional_ptr<HTTPState> state_p)
+	    : state(state_p && state_p->IsProfiling() ? state_p : nullptr) {
+		if (state) {
+			start = std::chrono::steady_clock::now();
+		}
+	}
+	~HTTPRequestTimer() {
+		if (state) {
+			auto elapsed = std::chrono::steady_clock::now() - start;
+			auto nanos = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
+			state->RecordRequestMetrics(NumericCast<idx_t>(MaxValue<int64_t>(nanos, 0)));
+		}
+	}
+	HTTPRequestTimer(const HTTPRequestTimer &) = delete;
+	HTTPRequestTimer &operator=(const HTTPRequestTimer &) = delete;
+
+private:
+	optional_ptr<HTTPState> state;
+	std::chrono::steady_clock::time_point start;
 };
 
 } // namespace duckdb
