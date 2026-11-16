@@ -76,7 +76,8 @@ static vector<MockS3RequestObservation> CopyRequests(const MockS3Server &server)
 	vector<MockS3RequestObservation> result;
 	std::copy_if(observations.begin(), observations.end(), std::back_inserter(result),
 	             [](const MockS3RequestObservation &observation) {
-		             return observation.method == "PUT" && !MockS3HeaderValues(observation, "x-amz-copy-source").empty();
+		             return observation.method == "PUT" &&
+		                    !MockS3HeaderValues(observation, "x-amz-copy-source").empty();
 	             });
 	return result;
 }
@@ -220,7 +221,8 @@ TEST_CASE("S3 MoveFile reports a source it copied but could not delete", "[httpf
 	auto error = MoveError(fs, SOURCE_PATH, TARGET_PATH);
 	INFO(error.RawMessage());
 	REQUIRE(error.HasError());
-	REQUIRE(StringUtil::Contains(error.RawMessage(), "succeeded, but deleting the source failed, so both objects exist"));
+	REQUIRE(
+	    StringUtil::Contains(error.RawMessage(), "succeeded, but deleting the source failed, so both objects exist"));
 	REQUIRE(CopyRequests(server).size() == 1);
 }
 

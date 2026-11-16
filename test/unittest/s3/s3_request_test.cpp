@@ -2955,9 +2955,9 @@ TEST_CASE("S3 CopyObject headers are signed for virtual-host style URLs", "[http
 		INFO(header);
 		REQUIRE(StringUtil::Contains(authorization, header));
 	}
-	auto without_condition = S3RequestUtil::CreateHeaders(
-	    encryption_util, parsed, S3RequestOperation::COPY_OBJECT, S3RequestQuery(), auth, "20261116",
-	    "20261116T000000Z", "", "", "", {}, {}, S3CopySource {copy_source.source, ""});
+	auto without_condition = S3RequestUtil::CreateHeaders(encryption_util, parsed, S3RequestOperation::COPY_OBJECT,
+	                                                      S3RequestQuery(), auth, "20261116", "20261116T000000Z", "",
+	                                                      "", "", {}, {}, S3CopySource {copy_source.source, ""});
 	REQUIRE_FALSE(without_condition.HasHeader("x-amz-copy-source-if-match"));
 }
 

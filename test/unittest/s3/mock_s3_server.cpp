@@ -1227,7 +1227,7 @@ public:
 		Record(request, response.status);
 	}
 
-		void HandleExtraObjectGet(const httplib::Request &request, httplib::Response &response, idx_t index) {
+	void HandleExtraObjectGet(const httplib::Request &request, httplib::Response &response, idx_t index) {
 		if (SendRegionRedirectOrAuthFailure(request, response)) {
 			return;
 		}
@@ -1318,7 +1318,7 @@ public:
 		return result;
 	}
 
-		void RegisterRoutes() {
+	void RegisterRoutes() {
 		D_ASSERT(config.endpoint_base_path.empty() ||
 		         (config.endpoint_base_path[0] == '/' && config.endpoint_base_path.back() != '/'));
 		const string path =

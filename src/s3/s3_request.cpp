@@ -1011,15 +1011,14 @@ S3RequestResult S3FileSystem::PutRequest(HTTPRequestSession &session, S3RequestO
 	const string content_type = "application/octet-stream";
 	S3RequestSpec spec {url, operation, [&](const ParsedS3Url &) { return query; }, payload_hash, content_type, ""};
 	spec.copy_source = copy_source;
-	return S3RequestExecutor::RunSession(
-	    GetEncryptionUtil(), session, spec, [&](S3RequestData &request_data) {
-		    auto &params = request_data.http_params->Cast<HTTPFSParams>();
-		    return RunPutRequest(request_data.http_url, request_data.headers, params, buffer_in, buffer_in_len,
-		                         content_type, [&](BaseRequest &request) {
-			                         request.try_request = true;
-			                         return S3RequestExecutor::SendSessionRequest(session, request_data, request);
-		                         });
-	    });
+	return S3RequestExecutor::RunSession(GetEncryptionUtil(), session, spec, [&](S3RequestData &request_data) {
+		auto &params = request_data.http_params->Cast<HTTPFSParams>();
+		return RunPutRequest(request_data.http_url, request_data.headers, params, buffer_in, buffer_in_len,
+		                     content_type, [&](BaseRequest &request) {
+			                     request.try_request = true;
+			                     return S3RequestExecutor::SendSessionRequest(session, request_data, request);
+		                     });
+	});
 }
 
 void S3FileSystem::ValidateResponseVersion(HTTPFileHandle &handle, const HTTPReadConfig &read_config,

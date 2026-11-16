@@ -91,7 +91,8 @@ void S3FileSystem::MoveFile(const string &source, const string &target, optional
 	if (!S3XMLResponseParser::TryParse(copy.body, parsed) || parsed.type != S3XMLResponseType::COPY_OBJECT_RESULT) {
 		if (parsed.type == S3XMLResponseType::ERROR) {
 			throw IOException("S3 copy from \"%s\" to \"%s\" failed: %s%s%s; the source was not deleted", source,
-			                  target_url, parsed.error_code.empty() ? "S3 returned an embedded error" : parsed.error_code,
+			                  target_url,
+			                  parsed.error_code.empty() ? "S3 returned an embedded error" : parsed.error_code,
 			                  parsed.error_message.empty() ? "" : ": ", parsed.error_message);
 		}
 		throw IOException("S3 copy from \"%s\" to \"%s\" returned no CopyObjectResult, so its outcome is unknown; the "
