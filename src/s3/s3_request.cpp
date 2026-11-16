@@ -82,7 +82,7 @@ const string &S3RequestQuery::CanonicalQuery() const {
 }
 
 const S3RequestOperationInfo &S3RequestUtil::GetOperationInfo(S3RequestOperation operation) {
-	static const array<S3RequestOperationInfo, 10> OPERATION_INFO = {
+	static const array<S3RequestOperationInfo, 11> OPERATION_INFO = {
 	    S3RequestOperationInfo {RequestType::HEAD_REQUEST, S3RequestTarget::OBJECT, "checking", true,
 	                            S3ThrottleRetry::BY_STATUS, false, false, true},
 	    S3RequestOperationInfo {RequestType::GET_REQUEST, S3RequestTarget::OBJECT, "reading", true,
@@ -102,7 +102,9 @@ const S3RequestOperationInfo &S3RequestUtil::GetOperationInfo(S3RequestOperation
 	    S3RequestOperationInfo {RequestType::POST_REQUEST, S3RequestTarget::OBJECT, "completing multipart upload for",
 	                            false, S3ThrottleRetry::BY_STATUS, true, false, true},
 	    S3RequestOperationInfo {RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, "aborting multipart upload for",
-	                            true, S3ThrottleRetry::BY_STATUS, false, false, false}};
+	                            true, S3ThrottleRetry::BY_STATUS, false, false, false},
+	    S3RequestOperationInfo {RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, "copying to", true,
+	                            S3ThrottleRetry::BY_STATUS, false, true, false}};
 	auto index = static_cast<idx_t>(operation);
 	if (index >= OPERATION_INFO.size()) {
 		throw InternalException("Unknown S3 request operation");
@@ -148,6 +150,7 @@ private:
 		    {"If-Match", "If-Match"},
 		    {"x-amz-date", "x-amz-date"},
 		    {"x-amz-content-sha256", "x-amz-content-sha256"},
+		    {"x-amz-copy-source", "x-amz-copy-source"},
 		    {"x-amz-security-token", "x-amz-security-token"},
 		    {"x-amz-request-payer", "x-amz-request-payer"},
 		    {"x-amz-server-side-encryption", "x-amz-server-side-encryption"},
@@ -375,7 +378,7 @@ HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const 
                                          const S3AuthParams &auth_params, string date_now, string datetime_now,
                                          string payload_hash, string content_type, string content_md5,
                                          const HTTPConfiguredHeaders &configured_headers,
-                                         const HTTPReadCondition &read_condition) {
+                                         const HTTPReadCondition &read_condition, const string &copy_source) {
 	const auto &host = parsed_url.GetHost();
 	auto &operation_info = GetOperationInfo(operation);
 	const auto &encoded_path = operation_info.target == S3RequestTarget::BUCKET ? parsed_url.GetEncodedBucketPath()
@@ -392,6 +395,9 @@ HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const 
 	}
 	if (provider.GetType() == S3ProviderType::GCS && !request_options.user_project.empty()) {
 		headers["x-goog-user-project"] = request_options.user_project;
+	}
+	if (!copy_source.empty()) {
+		headers["x-amz-copy-source"] = copy_source;
 	}
 	switch (auth_type) {
 	case S3AuthType::ANONYMOUS: {
@@ -569,7 +575,7 @@ S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_ut
 	                      : parsed_s3_url.GetHTTPUrl(query.WireQuery());
 	result.headers = S3RequestUtil::CreateHeaders(
 	    encryption_util, parsed_s3_url, spec.operation, query, result.auth_params, "", "", spec.payload_hash,
-	    spec.content_type, spec.content_md5, session_request.configured_headers, spec.read_condition);
+	    spec.content_type, spec.content_md5, session_request.configured_headers, spec.read_condition, spec.copy_source);
 	return result;
 }
 

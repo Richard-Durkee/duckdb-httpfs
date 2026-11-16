@@ -1968,7 +1968,7 @@ TEST_CASE("S3 request operations define transport and retry policy", "[httpfs][s
 	};
 	// Every operation is sent again when S3 throttles it. CreateMultipartUpload, which is otherwise never sent
 	// again, only when S3's error document says SlowDown or TooManyRequests
-	const array<ExpectedOperationInfo, 10> expected {{
+	const array<ExpectedOperationInfo, 11> expected {{
 	    {S3RequestOperation::HEAD_OBJECT, RequestType::HEAD_REQUEST, S3RequestTarget::OBJECT, true,
 	     S3ThrottleRetry::BY_STATUS, false, false, true},
 	    {S3RequestOperation::GET_OBJECT, RequestType::GET_REQUEST, S3RequestTarget::OBJECT, true,
@@ -1989,6 +1989,8 @@ TEST_CASE("S3 request operations define transport and retry policy", "[httpfs][s
 	     S3ThrottleRetry::BY_STATUS, true, false, true},
 	    {S3RequestOperation::ABORT_MULTIPART_UPLOAD, RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, true,
 	     S3ThrottleRetry::BY_STATUS, false, false, false},
+	    {S3RequestOperation::COPY_OBJECT, RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, true,
+	     S3ThrottleRetry::BY_STATUS, false, true, false},
 	}};
 
 	for (const auto &entry : expected) {

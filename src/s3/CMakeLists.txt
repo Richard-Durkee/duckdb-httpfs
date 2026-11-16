@@ -4,6 +4,7 @@ target_sources(
           s3_delete.cpp
           s3_endpoint.cpp
           s3_list.cpp
+          s3_move.cpp
           s3_provider.cpp
           s3_request.cpp
           s3_settings.cpp
