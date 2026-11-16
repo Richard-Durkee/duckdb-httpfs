@@ -103,8 +103,9 @@ public:
 
 public:
 	//! Session lifecycle.
+	//! With exclusive_create, the upload creates the object only if it does not exist yet (If-None-Match: *)
 	S3UploadSession(S3FileSystem &s3fs, shared_ptr<HTTPRequestSession> request_session, string path,
-	                S3UploadConfig config);
+	                S3UploadConfig config, bool exclusive_create = false);
 	~S3UploadSession() noexcept;
 
 	//! Upload operations.
@@ -152,6 +153,12 @@ private:
 	void UploadPart(PreparedPart &part);
 	shared_ptr<const ErrorData> AbortMultipartUpload(const string &upload_id);
 
+	//! Exclusive create: whether a 412 to the final request means that this upload's own earlier attempt created
+	//! the object, which a retry after a lost response can see
+	bool CreatedByThisUpload(const_data_ptr_t data, idx_t size);
+	bool CompletedByThisUpload(const MultipartSnapshot &snapshot);
+	[[noreturn]] void ThrowObjectExists(const S3RequestContext &request_context);
+
 	//! Request diagnostics.
 	string GetDisplayPath() const;
 	static HTTPException GetStatusError(const HTTPResponse &response, const S3RequestContext &request_context);
@@ -162,6 +169,7 @@ private:
 	shared_ptr<HTTPRequestSession> request_session;
 	const string path;
 	const S3UploadConfig config;
+	const bool exclusive_create;
 
 	//! Operation and lifecycle synchronization.
 	annotated_mutex state_lock;

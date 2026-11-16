@@ -148,6 +148,7 @@ private:
 		    {"Content-MD5", "Content-MD5"},
 		    {"Range", "Range"},
 		    {"If-Match", "If-Match"},
+		    {"If-None-Match", "If-None-Match"},
 		    {"x-amz-date", "x-amz-date"},
 		    {"x-amz-content-sha256", "x-amz-content-sha256"},
 		    {"x-amz-copy-source", "x-amz-copy-source"},
@@ -379,7 +380,8 @@ HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const 
                                          const S3AuthParams &auth_params, string date_now, string datetime_now,
                                          string payload_hash, string content_type, string content_md5,
                                          const HTTPConfiguredHeaders &configured_headers,
-                                         const HTTPReadCondition &read_condition, const S3CopySource &copy_source) {
+                                         const HTTPReadCondition &read_condition, const S3CopySource &copy_source,
+                                         S3WriteCondition write_condition) {
 	const auto &host = parsed_url.GetHost();
 	auto &operation_info = GetOperationInfo(operation);
 	const auto &encoded_path = operation_info.target == S3RequestTarget::BUCKET ? parsed_url.GetEncodedBucketPath()
@@ -396,6 +398,13 @@ HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const 
 	}
 	if (provider.GetType() == S3ProviderType::GCS && !request_options.user_project.empty()) {
 		headers["x-goog-user-project"] = request_options.user_project;
+	}
+	if (write_condition == S3WriteCondition::NOT_EXISTS) {
+		if (provider.GetType() == S3ProviderType::GCS) {
+			throw NotImplementedException("Writing \"%s\" only if it does not exist is not supported on GCS",
+			                              parsed_url.GetHTTPUrl(""));
+		}
+		headers["If-None-Match"] = "*";
 	}
 	if (!copy_source.source.empty()) {
 		headers["x-amz-copy-source"] = copy_source.source;
@@ -577,9 +586,10 @@ S3RequestData S3RequestExecutor::CreateRequestData(EncryptionUtil &encryption_ut
 	result.http_url = operation_info.target == S3RequestTarget::BUCKET
 	                      ? parsed_s3_url.GetBucketHTTPUrl(query.WireQuery())
 	                      : parsed_s3_url.GetHTTPUrl(query.WireQuery());
-	result.headers = S3RequestUtil::CreateHeaders(
-	    encryption_util, parsed_s3_url, spec.operation, query, result.auth_params, "", "", spec.payload_hash,
-	    spec.content_type, spec.content_md5, session_request.configured_headers, spec.read_condition, spec.copy_source);
+	result.headers = S3RequestUtil::CreateHeaders(encryption_util, parsed_s3_url, spec.operation, query,
+	                                              result.auth_params, "", "", spec.payload_hash, spec.content_type,
+	                                              spec.content_md5, session_request.configured_headers,
+	                                              spec.read_condition, spec.copy_source, spec.write_condition);
 	return result;
 }
 
@@ -677,9 +687,22 @@ static bool IsS3RequestTimeoutError(const ErrorData &error) {
 	return S3XMLResponseParser::TryParseError(body_entry->second, s3_error) && s3_error.code == "RequestTimeout";
 }
 
+//! S3 refuses a conditional write that races another write of the object with 409 ConditionalRequestConflict
+static bool IsConditionalRequestConflict(const HTTPResponse &response) {
+	if (response.status != HTTPStatusCode::Conflict_409 || response.body.empty()) {
+		return false;
+	}
+	S3XMLError error;
+	return S3XMLResponseParser::TryParseError(response.body, error) && error.code == "ConditionalRequestConflict";
+}
+
 static bool ShouldRetryReceivedResponse(const S3RequestData &request_data, const HTTPResponse &response) {
 	if (response.HasRequestError()) {
 		return false;
+	}
+	// a PUT can be sent again after the race; a multipart completion can not, its upload has to start over
+	if (request_data.operation == S3RequestOperation::PUT_OBJECT && IsConditionalRequestConflict(response)) {
+		return true;
 	}
 	auto &operation_info = S3RequestUtil::GetOperationInfo(request_data.operation);
 	if (operation_info.retry_timeout && S3RequestUtil::IsRequestTimeout(response)) {
@@ -792,6 +815,7 @@ S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequ
 		}
 	});
 	result.context.throttled_retries = retry_budget.ThrottledRetries();
+	result.context.retries = retry_budget.RetriesUsed();
 	return result;
 }
 
@@ -981,29 +1005,28 @@ string S3RequestUtil::GetPayloadHash(EncryptionUtil &encryption_util, const_data
 
 S3RequestResult S3FileSystem::PostRequest(HTTPRequestSession &session, S3RequestOperation operation, const string &url,
                                           string &result, const_data_ptr_t buffer_in, idx_t buffer_in_len,
-                                          const S3RequestQuery &query) {
+                                          const S3RequestQuery &query, S3WriteCondition write_condition) {
 	if (S3RequestUtil::GetOperationInfo(operation).request_type != RequestType::POST_REQUEST) {
 		throw InternalException("S3 PostRequest requires a POST operation");
 	}
 	auto payload_hash = S3RequestUtil::GetPayloadHash(GetEncryptionUtil(), buffer_in, buffer_in_len);
 	const string content_type = "application/octet-stream";
-	return S3RequestExecutor::RunSession(
-	    GetEncryptionUtil(), session,
-	    S3RequestSpec {url, operation, [&](const ParsedS3Url &) { return query; }, payload_hash, content_type, ""},
-	    [&](S3RequestData &request_data) {
-		    result.clear();
-		    auto &params = request_data.http_params->Cast<HTTPFSParams>();
-		    return RunPostRequest(request_data.http_url, request_data.headers, params, result, buffer_in, buffer_in_len,
-		                          [&](BaseRequest &request) {
-			                          request.try_request = true;
-			                          return S3RequestExecutor::SendSessionRequest(session, request_data, request);
-		                          });
-	    });
+	S3RequestSpec spec {url, operation, [&](const ParsedS3Url &) { return query; }, payload_hash, content_type, ""};
+	spec.write_condition = write_condition;
+	return S3RequestExecutor::RunSession(GetEncryptionUtil(), session, spec, [&](S3RequestData &request_data) {
+		result.clear();
+		auto &params = request_data.http_params->Cast<HTTPFSParams>();
+		return RunPostRequest(request_data.http_url, request_data.headers, params, result, buffer_in, buffer_in_len,
+		                      [&](BaseRequest &request) {
+			                      request.try_request = true;
+			                      return S3RequestExecutor::SendSessionRequest(session, request_data, request);
+		                      });
+	});
 }
 
 S3RequestResult S3FileSystem::PutRequest(HTTPRequestSession &session, S3RequestOperation operation, const string &url,
                                          const_data_ptr_t buffer_in, idx_t buffer_in_len, const S3RequestQuery &query,
-                                         const S3CopySource &copy_source) {
+                                         const S3CopySource &copy_source, S3WriteCondition write_condition) {
 	if (S3RequestUtil::GetOperationInfo(operation).request_type != RequestType::PUT_REQUEST) {
 		throw InternalException("S3 PutRequest requires a PUT operation");
 	}
@@ -1011,6 +1034,7 @@ S3RequestResult S3FileSystem::PutRequest(HTTPRequestSession &session, S3RequestO
 	const string content_type = "application/octet-stream";
 	S3RequestSpec spec {url, operation, [&](const ParsedS3Url &) { return query; }, payload_hash, content_type, ""};
 	spec.copy_source = copy_source;
+	spec.write_condition = write_condition;
 	return S3RequestExecutor::RunSession(GetEncryptionUtil(), session, spec, [&](S3RequestData &request_data) {
 		auto &params = request_data.http_params->Cast<HTTPFSParams>();
 		return RunPutRequest(request_data.http_url, request_data.headers, params, buffer_in, buffer_in_len,

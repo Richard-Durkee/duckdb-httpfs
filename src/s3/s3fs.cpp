@@ -59,7 +59,17 @@ S3FileHandle::S3FileHandle(FileSystem &fs, const OpenFileInfo &file, FileOpenFla
 		}
 	}
 	if (flags.OpenForWriting()) {
-		upload_session = make_uniq<S3UploadSession>(fs.Cast<S3FileSystem>(), request_session, file.path, upload_config);
+		if (flags.ExclusiveCreate() && auth_params_p.GetProvider().GetType() == S3ProviderType::GCS) {
+			throw NotImplementedException("Creating \"%s\" only if it does not exist is not supported on GCS",
+			                              file.path);
+		}
+		if (flags.ReturnNullIfExists()) {
+			throw NotImplementedException("Opening \"%s\" with FILE_FLAGS_NULL_IF_EXISTS is not supported: S3 "
+			                              "reports an existing object only when the upload completes",
+			                              file.path);
+		}
+		upload_session = make_uniq<S3UploadSession>(fs.Cast<S3FileSystem>(), request_session, file.path, upload_config,
+		                                            flags.ExclusiveCreate());
 	}
 }
 

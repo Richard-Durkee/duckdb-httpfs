@@ -121,6 +121,8 @@ struct S3RequestContext {
 	string display_url;
 	//! Retries admitted for HTTP 429 or 503 responses.
 	idx_t throttled_retries = 0;
+	//! Retries the request got, by the S3 request loop or the HTTP layer below it: a request sent more than once
+	idx_t retries = 0;
 
 	const S3AuthParams &GetAuthParams() const {
 		D_ASSERT(captured.snapshot);
@@ -132,6 +134,10 @@ struct S3RequestResult {
 	unique_ptr<HTTPResponse> response;
 	S3RequestContext context;
 };
+
+//! A condition on the object a write creates: NOT_EXISTS sends If-None-Match: *, so that S3 refuses the write
+//! (412 Precondition Failed) when the object already exists
+enum class S3WriteCondition : uint8_t { NONE, NOT_EXISTS };
 
 //! The source of a CopyObject, and the ETag it must still have
 struct S3CopySource {
@@ -153,6 +159,7 @@ struct S3RequestSpec {
 	HTTPObjectVersion object_version;
 	HTTPReadCondition read_condition;
 	S3CopySource copy_source;
+	S3WriteCondition write_condition = S3WriteCondition::NONE;
 };
 
 struct S3RequestData {
@@ -185,8 +192,8 @@ struct S3RequestUtil {
 	                                 const S3AuthParams &auth_params, string date_now = "", string datetime_now = "",
 	                                 string payload_hash = "", string content_type = "", string content_md5 = "",
 	                                 const HTTPConfiguredHeaders &configured_headers = {},
-	                                 const HTTPReadCondition &read_condition = {},
-	                                 const S3CopySource &copy_source = {});
+	                                 const HTTPReadCondition &read_condition = {}, const S3CopySource &copy_source = {},
+	                                 S3WriteCondition write_condition = S3WriteCondition::NONE);
 	static string GetPayloadHash(EncryptionUtil &encryption_util, const_data_ptr_t buffer, idx_t buffer_len);
 	static bool IsRequestTimeout(const HTTPResponse &response);
 	static bool IsRetryableReceivedResponse(const HTTPResponse &response);

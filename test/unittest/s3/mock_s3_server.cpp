@@ -1,5 +1,6 @@
 #include "s3/mock_s3_server.hpp"
 
+#include "duckdb/common/crypto/md5.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/mutex.hpp"
 #include "duckdb/common/atomic.hpp"
@@ -608,7 +609,12 @@ public:
 		                          ? config.metadata.head_content_length.GetIndex()
 		                          : data.size();
 		response.set_header("Content-Length", std::to_string(content_length));
-		response.set_header("ETag", config.metadata.etag);
+		string uploaded_etag;
+		if (config.upload.md5_etags) {
+			annotated_lock_guard<annotated_mutex> lock(upload_lock);
+			uploaded_etag = uploaded_object_etag;
+		}
+		response.set_header("ETag", uploaded_etag.empty() ? config.metadata.etag : uploaded_etag);
 		if (config.metadata.version_on_head && !config.metadata.version_id.empty()) {
 			response.set_header("x-amz-version-id", config.metadata.version_id);
 		}
@@ -637,6 +643,24 @@ public:
 	void SendSlowDown(const httplib::Request &request, httplib::Response &response) const {
 		response.status = 503;
 		response.set_content("<Error><Code>SlowDown</Code><Message>Please reduce your request rate.</Message></Error>",
+		                     "application/xml");
+		Record(request, response.status);
+	}
+
+	static string QuotedMD5(const string &data) {
+		MD5Context md5;
+		md5.Add(data);
+		return "\"" + md5.FinishHex() + "\"";
+	}
+
+	static bool IsExclusiveCreate(const httplib::Request &request) {
+		return request.has_header("If-None-Match") && request.get_header_value("If-None-Match") == "*";
+	}
+
+	void SendPreconditionFailed(const httplib::Request &request, httplib::Response &response) const {
+		response.status = 412;
+		response.set_content("<Error><Code>PreconditionFailed</Code><Message>At least one of the pre-conditions you "
+		                     "specified did not hold</Message></Error>",
 		                     "application/xml");
 		Record(request, response.status);
 	}
@@ -681,14 +705,17 @@ public:
 		response.status = response_config.status;
 		if (part_number.IsValid()) {
 			auto part = part_number.GetIndex();
-			auto etag = StringUtil::Format("\"mock-part-%llu\"", part);
+			auto etag =
+			    config.upload.md5_etags ? QuotedMD5(request.body) : StringUtil::Format("\"mock-part-%llu\"", part);
 			SetETagHeader(response, response_config.etag, etag);
 			annotated_lock_guard<annotated_mutex> lock(upload_lock);
 			uploaded_parts[part] = {std::move(etag), request.body};
 		} else {
-			SetETagHeader(response, response_config.etag, "\"httpfs-refresh-test-upload-etag\"");
+			auto etag = config.upload.md5_etags ? QuotedMD5(request.body) : "\"httpfs-refresh-test-upload-etag\"";
+			SetETagHeader(response, response_config.etag, etag);
 			annotated_lock_guard<annotated_mutex> lock(upload_lock);
 			uploaded_object = request.body;
+			uploaded_object_etag = etag;
 			if (!config.http_response.object_put_body.empty()) {
 				response.set_content(config.http_response.object_put_body, "application/octet-stream");
 			}
@@ -767,6 +794,18 @@ public:
 			previous_part_number = manifest_part.part_number;
 		}
 		uploaded_object = std::move(completed_object);
+		if (config.upload.md5_etags) {
+			MD5Context md5;
+			for (auto &manifest_part : manifest) {
+				auto hex = StringUtil::Replace(uploaded_parts.find(manifest_part.part_number)->second.etag, "\"", "");
+				for (idx_t i = 0; i + 1 < hex.size(); i += 2) {
+					auto byte =
+					    static_cast<data_t>(StringUtil::GetHexValue(hex[i]) << 4 | StringUtil::GetHexValue(hex[i + 1]));
+					md5.Add(&byte, 1);
+				}
+			}
+			uploaded_object_etag = "\"" + md5.FinishHex() + "-" + std::to_string(manifest.size()) + "\"";
+		}
 		multipart_upload_published = true;
 		return true;
 	}
@@ -827,12 +866,20 @@ public:
 			Record(request, response.status);
 			return;
 		}
+		if (IsExclusiveCreate(request) && config.upload.object_exists) {
+			SendPreconditionFailed(request, response);
+			return;
+		}
 		if (!TryCompleteMultipartUpload(request)) {
 			response.status = 400;
 			response.set_content("<Error><Code>InvalidPart</Code><Message>Invalid multipart completion "
 			                     "manifest.</Message></Error>",
 			                     "application/xml");
 			Record(request, response.status);
+			return;
+		}
+		if (IsExclusiveCreate(request) && config.upload.create_then_precondition_failed) {
+			SendPreconditionFailed(request, response);
 			return;
 		}
 		switch (config.upload.completion_behavior) {
@@ -1055,6 +1102,23 @@ public:
 			SendS3Error400(request, response, false);
 			return;
 		}
+		if (!part_number.IsValid() && IsExclusiveCreate(request)) {
+			if (config.upload.object_exists) {
+				SendPreconditionFailed(request, response);
+				return;
+			}
+			if (config.upload.create_then_precondition_failed) {
+				// the first attempt stores the object and its response is lost; the retry finds the object
+				if (!exclusive_put_stored.exchange(true)) {
+					httplib::Response stored;
+					SendPutResponse(request, stored);
+					SendS3Error400(request, response, true);
+					return;
+				}
+				SendPreconditionFailed(request, response);
+				return;
+			}
+		}
 		if (remaining_put_failures.load() > 0) {
 			remaining_put_failures--;
 			if (config.failures.transient_put_code.empty()) {
@@ -1112,7 +1176,13 @@ public:
 				SendS3Error400(request, response, false);
 				return;
 			}
-			if (upload_id != config.upload.upload_id) {
+			bool published;
+			{
+				annotated_lock_guard<annotated_mutex> lock(upload_lock);
+				published = multipart_upload_published;
+			}
+			// S3 finds no upload once it is completed; opt in, as other tests abort a completed mock upload
+			if (upload_id != config.upload.upload_id || (published && config.upload.create_then_precondition_failed)) {
 				response.status = 404;
 				response.set_content("<Error><Code>NoSuchUpload</Code></Error>", "application/xml");
 				Record(request, response.status);
@@ -1732,6 +1802,8 @@ public:
 	string uploaded_object DUCKDB_GUARDED_BY(upload_lock);
 	string completion_body DUCKDB_GUARDED_BY(upload_lock);
 	bool multipart_upload_published DUCKDB_GUARDED_BY(upload_lock) = false;
+	string uploaded_object_etag DUCKDB_GUARDED_BY(upload_lock);
+	std::atomic<bool> exclusive_put_stored {false};
 	idx_t active_part_uploads DUCKDB_GUARDED_BY(upload_lock) = 0;
 	idx_t maximum_active_part_uploads DUCKDB_GUARDED_BY(upload_lock) = 0;
 	bool part_uploads_released DUCKDB_GUARDED_BY(upload_lock) = false;

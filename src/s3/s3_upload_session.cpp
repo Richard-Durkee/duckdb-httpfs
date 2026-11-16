@@ -5,10 +5,13 @@
 #include "s3/s3_xml_response.hpp"
 #include "s3/s3fs.hpp"
 
+#include "duckdb/common/crypto/md5.hpp"
 #include "duckdb/common/exception.hpp"
 #include "duckdb/common/limits.hpp"
 #include "duckdb/common/string_util.hpp"
 
+#include <algorithm>
+#include <cerrno>
 #include <cstring>
 
 namespace duckdb {
@@ -57,8 +60,9 @@ void S3UploadSession::WriteClaim::Fail(ErrorData error, FailureDisposition dispo
 }
 
 S3UploadSession::S3UploadSession(S3FileSystem &s3fs_p, shared_ptr<HTTPRequestSession> request_session_p, string path_p,
-                                 S3UploadConfig config_p)
-    : s3fs(s3fs_p), request_session(std::move(request_session_p)), path(std::move(path_p)), config(config_p) {
+                                 S3UploadConfig config_p, bool exclusive_create_p)
+    : s3fs(s3fs_p), request_session(std::move(request_session_p)), path(std::move(path_p)), config(config_p),
+      exclusive_create(exclusive_create_p) {
 }
 
 S3UploadSession::~S3UploadSession() noexcept = default;
@@ -458,7 +462,9 @@ void S3UploadSession::ThrowIfFailed() DUCKDB_EXCLUDES(state_lock) {
 
 S3RequestResult S3UploadSession::RunUploadRequest(S3RequestOperation operation, const_data_ptr_t data, idx_t size,
                                                   const S3RequestQuery &query) {
-	auto result = s3fs.get().PutRequest(*request_session, operation, path, data, size, query);
+	auto condition = exclusive_create && operation == S3RequestOperation::PUT_OBJECT ? S3WriteCondition::NOT_EXISTS
+	                                                                                 : S3WriteCondition::NONE;
+	auto result = s3fs.get().PutRequest(*request_session, operation, path, data, size, query, {}, condition);
 	if (result.response->HasRequestError()) {
 		throw IOException("S3 upload request for \"%s\" could not be completed: %s", result.context.display_url,
 		                  result.response->GetRequestError());
@@ -469,6 +475,12 @@ S3RequestResult S3UploadSession::RunUploadRequest(S3RequestOperation operation, 
 void S3UploadSession::UploadObject(const_data_ptr_t data, idx_t size) {
 	auto request_result = RunUploadRequest(S3RequestOperation::PUT_OBJECT, data, size, S3RequestQuery());
 	auto &response = request_result.response;
+	if (exclusive_create && response->status == HTTPStatusCode::PreconditionFailed_412) {
+		if (request_result.context.retries > 0 && CreatedByThisUpload(data, size)) {
+			return;
+		}
+		ThrowObjectExists(request_result.context);
+	}
 	if (response->status != HTTPStatusCode::OK_200 && response->status != HTTPStatusCode::Created_201) {
 		throw GetStatusError(*response, request_result.context);
 	}
@@ -532,9 +544,23 @@ void S3UploadSession::CompleteMultipartUpload() {
 	string result;
 	auto request_result =
 	    s3fs.get().PostRequest(*request_session, S3RequestOperation::COMPLETE_MULTIPART_UPLOAD, path, result,
-	                           const_data_ptr_cast(completion_body.data()), completion_body.size(), query);
+	                           const_data_ptr_cast(completion_body.data()), completion_body.size(), query,
+	                           exclusive_create ? S3WriteCondition::NOT_EXISTS : S3WriteCondition::NONE);
 	auto &response = request_result.response;
 	auto &request_context = request_result.context;
+	if (exclusive_create && !response->HasRequestError() &&
+	    response->status == HTTPStatusCode::PreconditionFailed_412) {
+		if (CompletedByThisUpload(snapshot)) {
+			return;
+		}
+		ThrowObjectExists(request_context);
+	}
+	if (exclusive_create && !response->HasRequestError() && response->status == HTTPStatusCode::Conflict_409) {
+		throw IOException({{"status_code", "409"}},
+		                  "S3 exclusive create of \"%s\" conflicted with a concurrent write of the object; S3 does not "
+		                  "accept the completion again, so the file has to be written again",
+		                  request_context.display_url);
+	}
 	if (response->HasRequestError()) {
 		throw S3AmbiguousUploadException(
 		    StringUtil::Format("S3 multipart upload completion for \"%s\" has an unknown outcome because the "
@@ -570,6 +596,86 @@ string S3UploadSession::GetDisplayPath() const {
 	auto captured = request_session->Capture();
 	auto &snapshot = captured.snapshot->Cast<S3RequestSnapshot>();
 	return S3Url::GetDisplayUrl(path, snapshot.auth_params);
+}
+
+// A PUT that was sent more than once can get a 412 for the object its own first attempt created, when that attempt's
+// response was lost. Without SSE-KMS the ETag of a single-part object is the MD5 of its bytes, so a matching ETag shows
+// the object has this upload's bytes; another writer that wrote the same bytes in the meantime is not told apart. With
+// SSE-KMS the ETag is not the MD5, so the outcome is unknown.
+bool S3UploadSession::CreatedByThisUpload(const_data_ptr_t data, idx_t size) {
+	auto &auth_params = request_session->Capture().snapshot->Cast<S3RequestSnapshot>().auth_params;
+	if (!auth_params.GetRequestOptions().kms_key_id.empty()) {
+		throw S3AmbiguousUploadException(StringUtil::Format(
+		    "S3 exclusive create of \"%s\" has an unknown outcome: the object exists, and with SSE-KMS its ETag can "
+		    "not show whether this upload created it",
+		    GetDisplayPath()));
+	}
+	auto head_result = s3fs.get().HeadRequest(*request_session, path);
+	auto &head = *head_result.response;
+	if (head.HasRequestError() || head.status != HTTPStatusCode::OK_200 || !head.HasHeader("ETag")) {
+		throw S3AmbiguousUploadException(StringUtil::Format(
+		    "S3 exclusive create of \"%s\" has an unknown outcome: S3 reported that the object exists, but checking "
+		    "it failed",
+		    GetDisplayPath()));
+	}
+	MD5Context md5;
+	md5.Add(data, size);
+	return StringUtil::Replace(head.GetHeaderValue("ETag"), "\"", "") == md5.FinishHex();
+}
+
+// A completion retried after its first attempt completed the upload gets a 412 for its own object. The upload tells
+// them apart: aborting it succeeds while it is still open, so the object is another writer's, and finds no upload once
+// it was completed. The object's ETag must then also be this upload's: the MD5 of the parts' MD5s and the part count,
+// or with SSE-KMS, whose part ETags are not MD5s, at least the part count.
+bool S3UploadSession::CompletedByThisUpload(const MultipartSnapshot &snapshot) {
+	auto abort_error = AbortMultipartUpload(*snapshot.upload_id);
+	{
+		annotated_lock_guard<annotated_mutex> guard(state_lock);
+		abort_suppressed = true;
+	}
+	if (!abort_error) {
+		return false;
+	}
+	auto status = abort_error->ExtraInfo().find("status_code");
+	if (status == abort_error->ExtraInfo().end() || status->second != "404") {
+		throw S3AmbiguousUploadException(StringUtil::Format(
+		    "S3 exclusive create of \"%s\" has an unknown outcome: the object exists, and checking whether this "
+		    "upload completed it failed: %s",
+		    GetDisplayPath(), abort_error->RawMessage()));
+	}
+	auto head_result = s3fs.get().HeadRequest(*request_session, path);
+	auto &head = *head_result.response;
+	if (head.HasRequestError() || head.status != HTTPStatusCode::OK_200 || !head.HasHeader("ETag")) {
+		throw S3AmbiguousUploadException(StringUtil::Format(
+		    "S3 exclusive create of \"%s\" has an unknown outcome: its upload is completed, but checking the object "
+		    "failed",
+		    GetDisplayPath()));
+	}
+	auto etag = StringUtil::Replace(head.GetHeaderValue("ETag"), "\"", "");
+	auto part_count = "-" + to_string(snapshot.etags.size());
+	auto &auth_params = request_session->Capture().snapshot->Cast<S3RequestSnapshot>().auth_params;
+	if (!auth_params.GetRequestOptions().kms_key_id.empty()) {
+		return StringUtil::EndsWith(etag, part_count);
+	}
+	MD5Context md5;
+	for (auto &part_etag : snapshot.etags) {
+		auto hex = StringUtil::Replace(part_etag, "\"", "");
+		if (hex.size() != MD5Context::MD5_HASH_LENGTH_TEXT ||
+		    !std::all_of(hex.begin(), hex.end(), StringUtil::CharacterIsHex)) {
+			return false;
+		}
+		for (idx_t i = 0; i < hex.size(); i += 2) {
+			auto byte = static_cast<data_t>(StringUtil::GetHexValue(hex[i]) << 4 | StringUtil::GetHexValue(hex[i + 1]));
+			md5.Add(&byte, 1);
+		}
+	}
+	return etag == md5.FinishHex() + part_count;
+}
+
+void S3UploadSession::ThrowObjectExists(const S3RequestContext &request_context) {
+	// as the local file system reports an exclusive create of an existing file
+	throw IOException({{"errno", std::to_string(EEXIST)}, {"status_code", "412"}},
+	                  "Cannot create \"%s\": the object already exists", request_context.display_url);
 }
 
 HTTPException S3UploadSession::GetStatusError(const HTTPResponse &response, const S3RequestContext &request_context) {

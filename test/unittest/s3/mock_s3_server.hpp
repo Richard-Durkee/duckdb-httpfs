@@ -222,6 +222,14 @@ struct MockS3UploadConfig {
 
 	//! Existing object preserved when an upload is abandoned
 	string initial_published_object;
+	//! PUT and multipart completion with If-None-Match: * get a 412, as if the object existed
+	bool object_exists = false;
+	//! A request retried after its first attempt created the object: an exclusive PUT stores the object and gets a
+	//! RequestTimeout, its retry a 412; an exclusive multipart completion completes the upload and gets a 412
+	bool create_then_precondition_failed = false;
+	//! ETags as S3 makes them without SSE-KMS: an object's or part's is the MD5 of its bytes, a multipart object's the
+	//! MD5 of its parts' MD5s and the part count. HEAD reports the uploaded object's.
+	bool md5_etags = false;
 	//! Multipart upload ID returned by the mock server
 	string upload_id = "refresh-test-upload-id";
 	//! Hold these one-based part numbers until ReleasePartUploads is called
