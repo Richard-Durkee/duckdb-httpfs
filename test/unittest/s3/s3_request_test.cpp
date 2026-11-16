@@ -1990,7 +1990,7 @@ TEST_CASE("S3 request operations define transport and retry policy", "[httpfs][s
 	    {S3RequestOperation::ABORT_MULTIPART_UPLOAD, RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, true,
 	     S3ThrottleRetry::BY_STATUS, false, false, false},
 	    {S3RequestOperation::COPY_OBJECT, RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, true,
-	     S3ThrottleRetry::BY_STATUS, false, true, false},
+	     S3ThrottleRetry::BY_STATUS, true, true, false},
 	}};
 
 	for (const auto &entry : expected) {
@@ -2928,6 +2928,37 @@ TEST_CASE("S3 full HTTP endpoints route every request through the normalized bas
 	SECTION("curl") {
 		RunNormalizedEndpointWireScenario("curl");
 	}
+}
+
+TEST_CASE("S3 CopyObject headers are signed for virtual-host style URLs", "[httpfs][s3][request][move]") {
+	auto config = TestAuthConfig();
+	config.credentials.access_key_id = "key";
+	config.credentials.secret_access_key = "secret";
+	config.request_options.kms_key_id = "kms-key";
+	config.request_options.requester_pays = true;
+	auto auth = ResolveTestAuth(config, "s3://bucket/k=1/a.bin");
+	auto parsed = S3Url::Parse("s3://bucket/k=1/a.bin", auth);
+	REQUIRE(StringUtil::StartsWith(parsed.GetHost(), "bucket."));
+	::AESStateSSLFactory encryption_util;
+	S3CopySource copy_source {"/bucket/staged%20dir/a%2Bb.bin", "\"etag\""};
+	auto headers = S3RequestUtil::CreateHeaders(encryption_util, parsed, S3RequestOperation::COPY_OBJECT,
+	                                            S3RequestQuery(), auth, "20261116", "20261116T000000Z",
+	                                            S3RequestUtil::GetPayloadHash(encryption_util, nullptr, 0),
+	                                            "application/octet-stream", "", {}, {}, copy_source);
+	REQUIRE(headers.GetHeaderValue("x-amz-copy-source") == copy_source.source);
+	REQUIRE(headers.GetHeaderValue("x-amz-copy-source-if-match") == copy_source.if_match);
+	REQUIRE(headers.GetHeaderValue("x-amz-server-side-encryption-aws-kms-key-id") == "kms-key");
+	REQUIRE(headers.GetHeaderValue("x-amz-request-payer") == "requester");
+	auto authorization = headers.GetHeaderValue("Authorization");
+	for (auto header : {"host", "x-amz-copy-source", "x-amz-copy-source-if-match", "x-amz-request-payer",
+	                    "x-amz-server-side-encryption", "x-amz-server-side-encryption-aws-kms-key-id"}) {
+		INFO(header);
+		REQUIRE(StringUtil::Contains(authorization, header));
+	}
+	auto without_condition = S3RequestUtil::CreateHeaders(
+	    encryption_util, parsed, S3RequestOperation::COPY_OBJECT, S3RequestQuery(), auth, "20261116",
+	    "20261116T000000Z", "", "", "", {}, {}, S3CopySource {copy_source.source, ""});
+	REQUIRE_FALSE(without_condition.HasHeader("x-amz-copy-source-if-match"));
 }
 
 } // namespace duckdb

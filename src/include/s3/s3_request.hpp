@@ -133,6 +133,14 @@ struct S3RequestResult {
 	S3RequestContext context;
 };
 
+//! The source of a CopyObject, and the ETag it must still have
+struct S3CopySource {
+	//! "/<bucket>/<key>", URL-encoded, sent as x-amz-copy-source
+	string source;
+	//! Sent as x-amz-copy-source-if-match
+	string if_match;
+};
+
 struct S3RequestSpec {
 	using CreateQueryCallback = std::function<S3RequestQuery(const ParsedS3Url &)>;
 
@@ -144,8 +152,7 @@ struct S3RequestSpec {
 	string content_md5;
 	HTTPObjectVersion object_version;
 	HTTPReadCondition read_condition;
-	//! CopyObject: the source object, sent as x-amz-copy-source
-	string copy_source;
+	S3CopySource copy_source;
 };
 
 struct S3RequestData {
@@ -178,7 +185,7 @@ struct S3RequestUtil {
 	                                 const S3AuthParams &auth_params, string date_now = "", string datetime_now = "",
 	                                 string payload_hash = "", string content_type = "", string content_md5 = "",
 	                                 const HTTPConfiguredHeaders &configured_headers = {},
-	                                 const HTTPReadCondition &read_condition = {}, const string &copy_source = "");
+	                                 const HTTPReadCondition &read_condition = {}, const S3CopySource &copy_source = {});
 	static string GetPayloadHash(EncryptionUtil &encryption_util, const_data_ptr_t buffer, idx_t buffer_len);
 	static bool IsRequestTimeout(const HTTPResponse &response);
 	static bool IsRetryableReceivedResponse(const HTTPResponse &response);

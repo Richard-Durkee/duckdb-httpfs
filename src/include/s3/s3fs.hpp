@@ -106,10 +106,11 @@ public:
 	void RemoveFile(const string &filename, optional_ptr<FileOpener> opener = nullptr) override;
 	void RemoveFiles(const vector<string> &filenames, optional_ptr<FileOpener> opener = nullptr) override;
 	void RemoveDirectory(const string &directory, optional_ptr<FileOpener> opener = nullptr) override;
-	//! Copies the object server-side (CopyObject) and then deletes the source. Not atomic: a failure after the copy
-	//! leaves both objects. Throws NotImplementedException when the move can not be done server-side (the target is
-	//! not on S3 or resolves to other S3 settings than the source, a versioned source, SSE-C, GCS, or a source larger
-	//! than CopyObject accepts), so that a caller can copy the bytes instead.
+	//! Copies the object server-side with CopyObject and then deletes the source: not atomic, so a failure after the
+	//! copy leaves both objects, and a source replaced between the copy and the delete is deleted. Throws
+	//! NotImplementedException when this file system can not move the object server-side: the target is not on S3,
+	//! the two paths resolve to different S3 settings, GCS, SSE-C, a versioned source or target, or a source larger
+	//! than one CopyObject accepts.
 	void MoveFile(const string &source, const string &target, optional_ptr<FileOpener> opener = nullptr) override;
 	void FileSync(FileHandle &handle) override;
 	void AbortFileWrite(FileHandle &handle) override;
@@ -131,7 +132,8 @@ public:
 	                            const S3RequestQuery &query = S3RequestQuery());
 	S3RequestResult PutRequest(HTTPRequestSession &session, S3RequestOperation operation, const string &s3_url,
 	                           const_data_ptr_t buffer_in, idx_t buffer_in_len,
-	                           const S3RequestQuery &query = S3RequestQuery());
+	                           const S3RequestQuery &query = S3RequestQuery(), const S3CopySource &copy_source = {});
+	S3RequestResult HeadRequest(HTTPRequestSession &session, const string &s3_url);
 	S3RequestResult DeleteRequest(HTTPRequestSession &session, S3RequestOperation operation, const string &s3_url,
 	                              const S3RequestQuery &query);
 	unique_ptr<HTTPResponse> DeleteRequest(FileHandle &handle, const string &s3_url, HTTPHeaders header_map) override;
@@ -159,7 +161,6 @@ private:
 	void RemoveFiles(const vector<string> &paths, optional_ptr<FileOpener> opener, const S3AuthResolveOptions &options);
 	bool ListFilesExtended(const string &directory, const std::function<void(OpenFileInfo &info)> &callback,
 	                       optional_ptr<FileOpener> opener, const S3AuthResolveOptions &options);
-	S3RequestResult CopyObjectRequest(HTTPRequestSession &session, const string &target_url, const string &copy_source);
 	S3RequestResult RunS3BulkDeleteRequest(HTTPRequestSession &session, const string &secret_lookup_url,
 	                                       const string &body, idx_t key_count, string &result);
 

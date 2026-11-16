@@ -104,7 +104,7 @@ const S3RequestOperationInfo &S3RequestUtil::GetOperationInfo(S3RequestOperation
 	    S3RequestOperationInfo {RequestType::DELETE_REQUEST, S3RequestTarget::OBJECT, "aborting multipart upload for",
 	                            true, S3ThrottleRetry::BY_STATUS, false, false, false},
 	    S3RequestOperationInfo {RequestType::PUT_REQUEST, S3RequestTarget::OBJECT, "copying to", true,
-	                            S3ThrottleRetry::BY_STATUS, false, true, false}};
+	                            S3ThrottleRetry::BY_STATUS, true, true, false}};
 	auto index = static_cast<idx_t>(operation);
 	if (index >= OPERATION_INFO.size()) {
 		throw InternalException("Unknown S3 request operation");
@@ -151,6 +151,7 @@ private:
 		    {"x-amz-date", "x-amz-date"},
 		    {"x-amz-content-sha256", "x-amz-content-sha256"},
 		    {"x-amz-copy-source", "x-amz-copy-source"},
+		    {"x-amz-copy-source-if-match", "x-amz-copy-source-if-match"},
 		    {"x-amz-security-token", "x-amz-security-token"},
 		    {"x-amz-request-payer", "x-amz-request-payer"},
 		    {"x-amz-server-side-encryption", "x-amz-server-side-encryption"},
@@ -378,7 +379,7 @@ HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const 
                                          const S3AuthParams &auth_params, string date_now, string datetime_now,
                                          string payload_hash, string content_type, string content_md5,
                                          const HTTPConfiguredHeaders &configured_headers,
-                                         const HTTPReadCondition &read_condition, const string &copy_source) {
+                                         const HTTPReadCondition &read_condition, const S3CopySource &copy_source) {
 	const auto &host = parsed_url.GetHost();
 	auto &operation_info = GetOperationInfo(operation);
 	const auto &encoded_path = operation_info.target == S3RequestTarget::BUCKET ? parsed_url.GetEncodedBucketPath()
@@ -396,8 +397,11 @@ HTTPHeaders S3RequestUtil::CreateHeaders(EncryptionUtil &encryption_util, const 
 	if (provider.GetType() == S3ProviderType::GCS && !request_options.user_project.empty()) {
 		headers["x-goog-user-project"] = request_options.user_project;
 	}
-	if (!copy_source.empty()) {
-		headers["x-amz-copy-source"] = copy_source;
+	if (!copy_source.source.empty()) {
+		headers["x-amz-copy-source"] = copy_source.source;
+		if (!copy_source.if_match.empty()) {
+			headers["x-amz-copy-source-if-match"] = copy_source.if_match;
+		}
 	}
 	switch (auth_type) {
 	case S3AuthType::ANONYMOUS: {
@@ -998,16 +1002,17 @@ S3RequestResult S3FileSystem::PostRequest(HTTPRequestSession &session, S3Request
 }
 
 S3RequestResult S3FileSystem::PutRequest(HTTPRequestSession &session, S3RequestOperation operation, const string &url,
-                                         const_data_ptr_t buffer_in, idx_t buffer_in_len, const S3RequestQuery &query) {
+                                         const_data_ptr_t buffer_in, idx_t buffer_in_len, const S3RequestQuery &query,
+                                         const S3CopySource &copy_source) {
 	if (S3RequestUtil::GetOperationInfo(operation).request_type != RequestType::PUT_REQUEST) {
 		throw InternalException("S3 PutRequest requires a PUT operation");
 	}
 	auto payload_hash = S3RequestUtil::GetPayloadHash(GetEncryptionUtil(), buffer_in, buffer_in_len);
 	const string content_type = "application/octet-stream";
+	S3RequestSpec spec {url, operation, [&](const ParsedS3Url &) { return query; }, payload_hash, content_type, ""};
+	spec.copy_source = copy_source;
 	return S3RequestExecutor::RunSession(
-	    GetEncryptionUtil(), session,
-	    S3RequestSpec {url, operation, [&](const ParsedS3Url &) { return query; }, payload_hash, content_type, ""},
-	    [&](S3RequestData &request_data) {
+	    GetEncryptionUtil(), session, spec, [&](S3RequestData &request_data) {
 		    auto &params = request_data.http_params->Cast<HTTPFSParams>();
 		    return RunPutRequest(request_data.http_url, request_data.headers, params, buffer_in, buffer_in_len,
 		                         content_type, [&](BaseRequest &request) {
@@ -1059,6 +1064,17 @@ unique_ptr<HTTPResponse> S3FileSystem::HeadRequest(FileHandle &handle, const str
 		               });
 	           })
 	    .response;
+}
+
+S3RequestResult S3FileSystem::HeadRequest(HTTPRequestSession &session, const string &s3_url) {
+	return S3RequestExecutor::RunSession(
+	    GetEncryptionUtil(), session, S3RequestSpec {s3_url, S3RequestOperation::HEAD_OBJECT, {}, "", "", ""},
+	    [&](S3RequestData &request_data) {
+		    auto &params = request_data.http_params->Cast<HTTPFSParams>();
+		    return RunHeadRequest(request_data.http_url, request_data.headers, params, [&](BaseRequest &request) {
+			    return S3RequestExecutor::SendSessionRequest(session, request_data, request);
+		    });
+	    });
 }
 
 unique_ptr<HTTPResponse> S3FileSystem::GetRequest(FileHandle &handle, string s3_url, HTTPHeaders header_map,
