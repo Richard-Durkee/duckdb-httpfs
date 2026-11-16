@@ -53,6 +53,9 @@ struct MockS3ObjectConfig {
 	unordered_map<string, string> generations;
 	//! Initial live generation; empty uses the unversioned data above
 	string generation;
+	//! DELETE of an extra object: the status, and the error document sent with a status of 400 or more
+	int delete_status = 204;
+	string delete_error_code;
 };
 
 //! How a region redirect names the bucket's region: the x-amz-bucket-region header on a 301, or the Region in
@@ -122,6 +125,9 @@ struct MockS3FailureConfig {
 	MockS3MalformedListBehavior malformed_list_behavior = MockS3MalformedListBehavior::TRUNCATED_XML;
 	//! Number of object PUTs to fail with a 400 before succeeding
 	idx_t transient_put_failures = 0;
+	//! With a code, the failed PUTs get this status and an error document with the code instead of a 400
+	int transient_put_status = 400;
+	string transient_put_code;
 	//! Number of object GETs to fail with a 400 before succeeding
 	idx_t transient_get_failures = 0;
 	//! Number of object HEADs to fail with a 400 before succeeding
@@ -243,7 +249,7 @@ struct MockS3ServerConfig {
 	bool use_ssl = false;
 	MockS3ObjectConfig object;
 	//! Objects served beside `object`, so that a test can express a second location and a bucket
-	//! holding more than one key. They answer HEAD, GET and ListObjectsV2 with the same credential
+	//! holding more than one key. They answer HEAD, GET, DELETE and ListObjectsV2 with the same credential
 	//! and region checks as `object`, and with none of the injected failures. Their bucket must
 	//! differ from `object.bucket`, because the routes of the two would otherwise collide.
 	vector<MockS3ObjectConfig> extra_objects;

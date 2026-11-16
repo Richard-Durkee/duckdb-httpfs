@@ -55,6 +55,20 @@ TEST_CASE("S3 XML responses follow text and namespace semantics", "[httpfs][s3][
 		REQUIRE(response.type == S3XMLResponseType::MULTIPART_COMPLETION);
 		CHECK(response.etag == "\"etag\"");
 	}
+	SECTION("a CopyObjectResult needs an ETag") {
+		const string input = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>"
+		                     "<CopyObjectResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">"
+		                     "<LastModified>2026-11-16T00:00:00.000Z</LastModified><ETag>&quot;etag&quot;</ETag>"
+		                     "</CopyObjectResult>";
+		S3XMLResponse response;
+		REQUIRE(S3XMLResponseParser::TryParse(input, response));
+		REQUIRE(response.type == S3XMLResponseType::COPY_OBJECT_RESULT);
+		CHECK(response.etag == "\"etag\"");
+		S3XMLResponse without_etag;
+		REQUIRE(S3XMLResponseParser::TryParse("<CopyObjectResult><LastModified>x</LastModified></CopyObjectResult>",
+		                                      without_etag));
+		REQUIRE(without_etag.type == S3XMLResponseType::UNKNOWN);
+	}
 	SECTION("default namespaces do not apply to unprefixed attributes") {
 		const string input =
 		    "<CompleteMultipartUploadResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\" "

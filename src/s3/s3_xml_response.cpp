@@ -658,6 +658,13 @@ private:
 			}
 			return;
 		}
+		if (root.local_name == "CopyObjectResult") {
+			if (GetChildText(root, root.namespace_uri, "ETag", response.etag) == ChildTextResult::FOUND &&
+			    !response.etag.empty()) {
+				response.type = S3XMLResponseType::COPY_OBJECT_RESULT;
+			}
+			return;
+		}
 		if (root.local_name != "Error") {
 			return;
 		}

@@ -4,7 +4,13 @@
 
 namespace duckdb {
 
-enum class S3XMLResponseType : uint8_t { UNKNOWN, MULTIPART_INITIALIZATION, MULTIPART_COMPLETION, ERROR };
+enum class S3XMLResponseType : uint8_t {
+	UNKNOWN,
+	MULTIPART_INITIALIZATION,
+	MULTIPART_COMPLETION,
+	COPY_OBJECT_RESULT,
+	ERROR
+};
 
 struct S3XMLResponse {
 	S3XMLResponseType type = S3XMLResponseType::UNKNOWN;

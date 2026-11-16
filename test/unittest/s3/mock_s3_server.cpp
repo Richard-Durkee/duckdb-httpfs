@@ -1057,7 +1057,15 @@ public:
 		}
 		if (remaining_put_failures.load() > 0) {
 			remaining_put_failures--;
-			SendS3Error400(request, response, config.failures.failure_is_request_timeout);
+			if (config.failures.transient_put_code.empty()) {
+				SendS3Error400(request, response, config.failures.failure_is_request_timeout);
+				return;
+			}
+			response.status = config.failures.transient_put_status;
+			response.set_content("<Error><Code>" + config.failures.transient_put_code +
+			                         "</Code><Message>Injected PUT failure</Message></Error>",
+			                     "application/xml");
+			Record(request, response.status);
 			return;
 		}
 		SendPutResponse(request, response);
@@ -1188,6 +1196,11 @@ public:
 			};
 			server.Get(object_path, get_object);
 			server.Get("https?://[^/]+" + object_path, get_object);
+			auto delete_object = [this, index](const httplib::Request &request, httplib::Response &response) {
+				HandleExtraObjectDelete(request, response, index);
+			};
+			server.Delete(EscapeRoute(object_path), delete_object);
+			server.Delete("https?://[^/]+" + EscapeRoute(object_path), delete_object);
 		}
 		for (auto &bucket : extra_buckets) {
 			auto list_extra_objects = [this, bucket](const httplib::Request &request, httplib::Response &response) {
@@ -1200,7 +1213,21 @@ public:
 	}
 
 	//! GET of the extra object at `index`: the whole object, or the requested range of it
-	void HandleExtraObjectGet(const httplib::Request &request, httplib::Response &response, idx_t index) {
+	void HandleExtraObjectDelete(const httplib::Request &request, httplib::Response &response, idx_t index) {
+		if (SendRegionRedirectOrAuthFailure(request, response)) {
+			return;
+		}
+		auto &object = config.extra_objects[index];
+		response.status = object.delete_status;
+		if (object.delete_status >= 400) {
+			response.set_content("<Error><Code>" + object.delete_error_code +
+			                         "</Code><Message>Injected delete failure</Message></Error>",
+			                     "application/xml");
+		}
+		Record(request, response.status);
+	}
+
+		void HandleExtraObjectGet(const httplib::Request &request, httplib::Response &response, idx_t index) {
 		if (SendRegionRedirectOrAuthFailure(request, response)) {
 			return;
 		}
@@ -1278,19 +1305,25 @@ public:
 		Record(request, response.status);
 	}
 
-	void RegisterRoutes() {
+	//! A path as an httplib route, which is a regular expression
+	static string EscapeRoute(const string &path) {
+		string result;
+		const string regex_characters = "\\.^$|()[]{}*+?";
+		for (const auto character : path) {
+			if (regex_characters.find(character) != string::npos) {
+				result += '\\';
+			}
+			result += character;
+		}
+		return result;
+	}
+
+		void RegisterRoutes() {
 		D_ASSERT(config.endpoint_base_path.empty() ||
 		         (config.endpoint_base_path[0] == '/' && config.endpoint_base_path.back() != '/'));
 		const string path =
 		    config.endpoint_base_path + StringUtil::Format("/%s/%s", config.object.bucket, config.object.key);
-		string route_path;
-		const string regex_characters = "\\.^$|()[]{}*+?";
-		for (const auto character : path) {
-			if (regex_characters.find(character) != string::npos) {
-				route_path += '\\';
-			}
-			route_path += character;
-		}
+		const auto route_path = EscapeRoute(path);
 		const string proxy_path = "https?://[^/]+" + route_path;
 		const string bucket_path = config.endpoint_base_path + StringUtil::Format("/%s", config.object.bucket);
 		const string bucket_path_with_slash = bucket_path + "/";
