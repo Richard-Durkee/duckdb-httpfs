@@ -78,6 +78,8 @@ public:
 	shared_ptr<HTTPState> state;
 	string user_agent = {""};
 	idx_t force_download_threshold = 0;
+	//! The curl client skips server addresses whose negotiated TCP maximum segment size is below this (0: off).
+	idx_t min_tcp_mss = 0;
 
 private:
 	friend class HTTPFSUtil;

@@ -1,5 +1,6 @@
 #include "http/http_settings.hpp"
 
+#include "http/http_tcp_mss.hpp"
 #include "http/httpfs_client.hpp"
 #include "duckdb/common/local_file_system.hpp"
 #include "duckdb/main/client_context.hpp"
@@ -129,6 +130,15 @@ static void SetHTTPConnectionCaching(ClientContext &context, SetScope scope, Val
 #endif
 }
 
+static void ValidateHTTPMinTCPMSS(ClientContext &context, SetScope scope, Value &parameter) {
+	if (parameter.IsNull()) {
+		throw InvalidInputException("NULL is not a valid option for http_min_tcp_mss");
+	}
+	if (UBigIntValue::Get(parameter) > 0) {
+		HTTPMinTCPMSS::CheckClient(DBConfig::GetConfig(context).GetHTTPUtil().GetName());
+	}
+}
+
 void HTTPSettings::Register(DBConfig &config) {
 	config.AddExtensionOption("http_timeout", "HTTP timeout read/write/connection/retry (in seconds)",
 	                          LogicalType::UBIGINT, Value::UBIGINT(HTTPParams::DEFAULT_TIMEOUT_SECONDS));
@@ -146,6 +156,11 @@ void HTTPSettings::Register(DBConfig &config) {
 	                          LogicalType::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR),
 	                          Value::MAP(LogicalType::VARCHAR, LogicalType::VARCHAR, {}, {}), SetExtraHTTPHeaders,
 	                          SetScope::GLOBAL);
+	config.AddExtensionOption(
+	    "http_min_tcp_mss",
+	    "Skip server addresses whose negotiated TCP maximum segment size is below this many bytes, and connect to "
+	    "the next address (curl client only; 0 disables)",
+	    LogicalType::UBIGINT, Value::UBIGINT(0), ValidateHTTPMinTCPMSS);
 	config.AddExtensionOption("force_download", "Forces upfront download of file", LogicalType::BOOLEAN, Value(false));
 	config.AddExtensionOption("force_download_threshold",
 	                          "Forces upfront download of files smaller than the given size in bytes",

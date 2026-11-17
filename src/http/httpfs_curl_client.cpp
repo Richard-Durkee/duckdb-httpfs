@@ -1,5 +1,6 @@
 #include "http/httpfs_client.hpp"
 #include "http/http_state.hpp"
+#include "http/http_tcp_mss.hpp"
 #include "duckdb/common/thread_annotation/thread_annotation.hpp"
 #include "duckdb/logging/logger.hpp"
 
@@ -144,6 +145,23 @@ CURLHandle::~CURLHandle() {
 	curl_easy_cleanup(curl);
 }
 
+CURLcode CURLHandle::Execute() {
+	errno = 0;
+	auto result = socket_filter ? socket_filter->Perform() : curl_easy_perform(curl);
+	execute_errno = errno;
+	return result;
+}
+
+void CURLHandle::SetMinTCPMSS(idx_t min_mss, idx_t connect_timeout_seconds, shared_ptr<Logger> logger) {
+	if (!socket_filter) {
+		if (min_mss == CURLSocketFilter::NO_MINIMUM) {
+			return;
+		}
+		socket_filter = make_uniq<CURLSocketFilter>();
+	}
+	socket_filter->Configure(curl, min_mss, connect_timeout_seconds, std::move(logger));
+}
+
 uint16_t CURLHandle::GetResponseCode() {
 	long response_code = 0; // NOLINT(google-runtime-int): required by curl_easy_getinfo
 	auto result = curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &response_code);
@@ -252,6 +270,7 @@ private:
 			const bool verify_ssl = params.VerifyServerCertificate();
 			client.curl->SetOption(CURLOPT_SSL_VERIFYPEER, verify_ssl ? 1L : 0L);
 			client.curl->SetOption(CURLOPT_SSL_VERIFYHOST, verify_ssl ? 2L : 0L);
+			client.curl->SetMinTCPMSS(params.min_tcp_mss, params.timeout, params.logger);
 		}
 
 		static void ConfigureTimeoutsAndCallbacks(HTTPFSCurlClient &client, const HTTPFSParams &params) {

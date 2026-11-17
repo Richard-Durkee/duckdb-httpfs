@@ -8,6 +8,7 @@
 
 namespace duckdb {
 class HTTPLogger;
+class Logger;
 class FileOpener;
 struct FileOpenerInfo;
 class HTTPState;
@@ -37,6 +38,8 @@ private:
 	CURLU *handle;
 };
 
+class CURLSocketFilter;
+
 class CURLHandle {
 private:
 	CURLHandle();
@@ -49,12 +52,10 @@ public:
 	operator CURL *() { // NOLINT(google-explicit-constructor)
 		return curl;
 	}
-	CURLcode Execute() {
-		errno = 0;
-		auto result = curl_easy_perform(curl);
-		execute_errno = errno;
-		return result;
-	}
+	CURLcode Execute();
+	//! Has new connections skip the server addresses whose negotiated TCP maximum segment size is below min_mss
+	//! (0: skip none). The skips are logged to 'logger'.
+	void SetMinTCPMSS(idx_t min_mss, idx_t connect_timeout_seconds, shared_ptr<Logger> logger);
 	//! errno as the last transfer left it, telling apart failures curl reports by the step that failed.
 	int GetExecuteErrno() const {
 		return execute_errno;
@@ -71,6 +72,7 @@ public:
 private:
 	CURL *curl = nullptr;
 	int execute_errno = 0;
+	unique_ptr<CURLSocketFilter> socket_filter;
 };
 
 class CURLRequestHeaders {

@@ -21,6 +21,9 @@ public:
 	string ca_cert_file;
 	//! Effective server certificate verification setting.
 	bool verify_ssl = true;
+	//! The curl client skips addresses with a smaller TCP MSS, so a connection made under one minimum must not serve
+	//! a request under another.
+	idx_t min_tcp_mss = 0;
 };
 
 } // namespace duckdb

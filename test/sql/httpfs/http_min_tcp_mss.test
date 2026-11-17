@@ -1,0 +1,138 @@
+# name: test/sql/httpfs/http_min_tcp_mss.test
+# description: http_min_tcp_mss skips server addresses with a small TCP maximum segment size, and still connects when every address is small
+# group: [httpfs]
+
+require httpfs
+
+require-env PYTHON_HTTP_SERVER_URL
+
+require-env PYTHON_HTTP_SERVER_DIR
+
+statement ok
+LOAD httpfs;
+
+# the setting is applied by the curl client only, so run under it whatever client the config selects
+statement ok
+SET httpfs_client_implementation='curl';
+
+query I
+SELECT current_setting('http_min_tcp_mss');
+----
+0
+
+statement error
+SET http_min_tcp_mss = NULL;
+----
+NULL is not a valid option for http_min_tcp_mss
+
+statement error
+SET http_min_tcp_mss = -1;
+----
+Failed to cast value
+
+# a failed request must show as an error here instead of being retried
+statement ok
+SET http_retries=0;
+
+# the file is read from the server every time, over a new connection, as only new connections are checked
+statement ok
+SET enable_external_file_cache=false;
+
+statement ok
+SET http_keep_alive=false;
+
+statement ok
+SET enable_logging=true;
+
+statement ok
+CALL enable_logging('HTTPFSInfo');
+
+statement ok
+COPY (SELECT 42 AS a) TO '{PYTHON_HTTP_SERVER_DIR}/http_min_tcp_mss.csv';
+
+# a minimum below the segment size of every connection skips nothing
+statement ok
+SET http_min_tcp_mss = 1;
+
+query I
+SELECT * FROM read_csv('{PYTHON_HTTP_SERVER_URL}/http_min_tcp_mss.csv');
+----
+42
+
+query I
+SELECT count(*) FROM duckdb_logs WHERE message LIKE '%min_tcp_mss%';
+----
+0
+
+# No connection reaches a minimum this large, so the address of the test server is skipped. With no other address
+# left, the request goes on with it rather than fail.
+statement ok
+SET http_min_tcp_mss = 1000000000;
+
+query I
+SELECT * FROM read_csv('{PYTHON_HTTP_SERVER_URL}/http_min_tcp_mss.csv');
+----
+42
+
+# the skip and the address that was kept below the minimum are both logged, with the segment size and the minimum
+query I
+SELECT count(*) >= 1 FROM duckdb_logs
+WHERE message LIKE '%"type":"min_tcp_mss_skipped"%' AND message LIKE '%"payload":"mss=%min=1000000000"%';
+----
+true
+
+# every connection the request opened skipped its address once and then kept it
+query I
+SELECT count(*) FILTER (WHERE message LIKE '%"type":"min_tcp_mss_skipped"%') > 0
+       AND count(*) FILTER (WHERE message LIKE '%"type":"min_tcp_mss_skipped"%') =
+           count(*) FILTER (WHERE message LIKE '%"type":"min_tcp_mss_kept_below_minimum"%')
+FROM duckdb_logs;
+----
+true
+
+# and the next request on the same setting does the same
+statement ok
+CALL truncate_duckdb_logs();
+
+query I
+SELECT * FROM read_csv('{PYTHON_HTTP_SERVER_URL}/http_min_tcp_mss.csv');
+----
+42
+
+query I
+SELECT count(*) > 0 FROM duckdb_logs WHERE message LIKE '%"type":"min_tcp_mss_kept_below_minimum"%';
+----
+true
+
+statement ok
+CALL truncate_duckdb_logs();
+
+statement ok
+RESET http_min_tcp_mss;
+
+query I
+SELECT * FROM read_csv('{PYTHON_HTTP_SERVER_URL}/http_min_tcp_mss.csv');
+----
+42
+
+# a minimum of 0 skips nothing, even though the callbacks are still installed on the connection
+query I
+SELECT count(*) FROM duckdb_logs WHERE message LIKE '%min_tcp_mss%';
+----
+0
+
+# the other clients do not apply the setting, so they refuse it
+statement ok
+SET httpfs_client_implementation = 'httplib';
+
+statement error
+SET http_min_tcp_mss = 1400;
+----
+http_min_tcp_mss is only applied by the curl HTTP client
+
+# 0 is fine with any client
+statement ok
+SET http_min_tcp_mss = 0;
+
+statement ok
+SET httpfs_client_implementation = 'curl';

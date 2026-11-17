@@ -49,17 +49,18 @@ HTTPFSConnectionConfig HTTPFSConnectionConfig::Create(const HTTPFSParams &params
 	result.transport_config = HTTPTransportConfig(params);
 	result.ca_cert_file = params.ca_cert_file;
 	result.verify_ssl = params.VerifyServerCertificate();
+	result.min_tcp_mss = params.min_tcp_mss;
 	return result;
 }
 
 bool HTTPFSConnectionConfig::Matches(const HTTPFSParams &params) const {
 	return transport_config.Matches(params) && ca_cert_file == params.ca_cert_file &&
-	       verify_ssl == params.VerifyServerCertificate();
+	       verify_ssl == params.VerifyServerCertificate() && min_tcp_mss == params.min_tcp_mss;
 }
 
 bool HTTPFSConnectionConfig::operator==(const HTTPFSConnectionConfig &other) const {
 	return transport_config == other.transport_config && ca_cert_file == other.ca_cert_file &&
-	       verify_ssl == other.verify_ssl;
+	       verify_ssl == other.verify_ssl && min_tcp_mss == other.min_tcp_mss;
 }
 
 void HTTPFSUtil::SetTransportReuseDomain(HTTPFSParams &params) {

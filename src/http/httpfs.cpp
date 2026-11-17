@@ -109,7 +109,15 @@ private:
 		FileOpener::TryGetCurrentSetting(opener, "unsafe_disable_etag_checks", result->unsafe_disable_etag_checks,
 		                                 info);
 		FileOpener::TryGetCurrentSetting(opener, "s3_version_id_pinning", result->s3_version_id_pinning, info);
+		FileOpener::TryGetCurrentSetting(opener, "http_min_tcp_mss", result->min_tcp_mss, info);
 		auto context = FileOpener::TryGetClientContext(opener);
+		if (context && result->min_tcp_mss > 0 &&
+		    DBConfig::GetConfig(*context).GetHTTPUtil().GetName() != "HTTPFS-Curl") {
+			// the setting is refused while a non-curl client is selected, so it was set under curl and the client
+			// changed since
+			DUCKDB_LOG_WARNING(*context, "http_min_tcp_mss is ignored because the HTTP client is not curl");
+			result->min_tcp_mss = 0;
+		}
 		Value external_cache_enabled;
 		if (context &&
 		    context->TryGetCurrentUserSetting(EnableExternalFileCacheSetting::SettingIndex, external_cache_enabled) &&

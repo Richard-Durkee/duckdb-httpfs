@@ -6,7 +6,8 @@ target_sources(
           http_request.cpp
           http_settings.cpp
           http_request_session.cpp
-          http_state.cpp)
+          http_state.cpp
+          http_tcp_mss.cpp)
 
 if(NOT EMSCRIPTEN)
   target_sources(httpfs_library PRIVATE httpfs_httplib_client.cpp
