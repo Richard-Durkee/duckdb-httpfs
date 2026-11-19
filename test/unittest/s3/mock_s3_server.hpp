@@ -237,6 +237,17 @@ struct MockS3SSECustomerConfig {
 	vector<string> accepted_keys;
 };
 
+//! A bucket that takes single PUTs to any key and keeps none of them, so a test can write many objects at once. It
+//! may answer HTTP 503 SlowDown above a write rate, as S3 does.
+struct MockS3WriteSinkConfig {
+	//! The bucket, other than `object.bucket`; empty for none.
+	string bucket;
+	//! Answer a write with HTTP 503 SlowDown above this many a second (0 = unlimited)
+	idx_t max_writes_per_second = 0;
+	//! Answer every write after this many milliseconds, as S3 takes time to answer
+	idx_t response_delay_ms = 0;
+};
+
 struct MockS3ServerConfig {
 	//! Path prefix configured as part of the endpoint, without a trailing slash
 	string endpoint_base_path;
@@ -257,6 +268,7 @@ struct MockS3ServerConfig {
 	MockS3UploadConfig upload;
 	MockS3SSECustomerConfig sse_customer;
 	MockS3HTTPResponseConfig http_response;
+	MockS3WriteSinkConfig write_sink;
 };
 
 struct MockS3RequestObservation {
@@ -318,6 +330,9 @@ public:
 	void ReleaseMultipartInitialization();
 	bool WaitForFullGet();
 	void ReleaseFullGet();
+	//! Writes the write sink accepted, and those it answered with SlowDown
+	idx_t WriteSinkWrites() const;
+	idx_t WriteSinkSlowDowns() const;
 
 private:
 	struct Impl;

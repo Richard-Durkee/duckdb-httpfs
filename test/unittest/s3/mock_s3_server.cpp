@@ -1169,6 +1169,57 @@ public:
 		return false;
 	}
 
+	//! Whether the write sink takes one more write now. Its quota refills evenly at `max_writes_per_second` and holds
+	//! at most a tenth of a second of writes, so that a burst cannot take a whole second's quota at once.
+	bool AdmitSinkWrite() DUCKDB_EXCLUDES(sink_lock) {
+		if (config.write_sink.max_writes_per_second == 0) {
+			return true;
+		}
+		auto rate = double(config.write_sink.max_writes_per_second);
+		auto capacity = MaxValue<double>(1, rate / 10);
+		auto now = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+		annotated_lock_guard<annotated_mutex> lock(sink_lock);
+		if (sink_refilled_at == 0) {
+			sink_tokens = capacity;
+		} else {
+			sink_tokens = MinValue<double>(capacity, sink_tokens + (now - sink_refilled_at) * rate);
+		}
+		sink_refilled_at = now;
+		if (sink_tokens < 1) {
+			return false;
+		}
+		sink_tokens -= 1;
+		return true;
+	}
+
+	void HandleSinkWrite(const httplib::Request &request, httplib::Response &response) {
+		if (config.write_sink.response_delay_ms > 0) {
+			std::this_thread::sleep_for(std::chrono::milliseconds(config.write_sink.response_delay_ms));
+		}
+		if (!AdmitSinkWrite()) {
+			sink_slowdowns++;
+			SendSlowDown(request, response);
+			return;
+		}
+		sink_writes++;
+		response.status = 200;
+		response.set_header("ETag", "\"sink\"");
+		Record(request, response.status);
+	}
+
+	void RegisterWriteSinkRoutes() {
+		if (config.write_sink.bucket.empty()) {
+			return;
+		}
+		const auto path = config.endpoint_base_path + StringUtil::Format("/%s/.+", config.write_sink.bucket);
+		auto write = [this](const httplib::Request &request, httplib::Response &response) {
+			HandleSinkWrite(request, response);
+		};
+		for (const auto &route : {path, "https?://[^/]+" + path}) {
+			server.Put(route, write);
+		}
+	}
+
 	//! Answer HEAD, GET and ListObjectsV2 for every extra object, with the credential and region
 	//! checks of the configured object and none of its injected failures
 	void RegisterExtraObjectRoutes() {
@@ -1606,6 +1657,7 @@ public:
 		server.Get(bucket_path, list_objects);
 		server.Get(bucket_path_with_slash, list_objects);
 		RegisterExtraObjectRoutes();
+		RegisterWriteSinkRoutes();
 
 		server.Put(route_path, [this](const httplib::Request &request, httplib::Response &response) {
 			HandleObjectPut(request, response);
@@ -1726,6 +1778,13 @@ public:
 	std::condition_variable full_get_release;
 	bool full_get_seen DUCKDB_GUARDED_BY(full_get_lock) = false;
 	bool full_get_released DUCKDB_GUARDED_BY(full_get_lock) = false;
+
+	//! Write sink: writes taken and refused, and its quota
+	atomic<idx_t> sink_writes {0};
+	atomic<idx_t> sink_slowdowns {0};
+	annotated_mutex sink_lock;
+	double sink_tokens DUCKDB_GUARDED_BY(sink_lock) = 0;
+	double sink_refilled_at DUCKDB_GUARDED_BY(sink_lock) = 0;
 };
 
 MockS3Server::MockS3Server(MockS3ServerConfig config) : impl(make_uniq<Impl>(std::move(config))) {
@@ -1766,6 +1825,14 @@ string MockS3Server::CompletionBody() const {
 
 vector<MockS3RequestObservation> MockS3Server::Observations() const {
 	return impl->Observations();
+}
+
+idx_t MockS3Server::WriteSinkWrites() const {
+	return impl->sink_writes.load();
+}
+
+idx_t MockS3Server::WriteSinkSlowDowns() const {
+	return impl->sink_slowdowns.load();
 }
 
 idx_t MockS3Server::MaximumConcurrentPartUploads() const {
