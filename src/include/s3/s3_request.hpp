@@ -183,6 +183,11 @@ struct S3RequestUtil {
 	static bool IsRetryableReceivedResponse(const HTTPResponse &response);
 	//! Whether a raised request error carries a throttling status, matching core's throttled retry admission.
 	static bool IsThrottledError(const ErrorData &error);
+	//! Whether S3 throttled a request of `operation` with this response.
+	static bool IsThrottledResponse(S3RequestOperation operation, const HTTPResponse &response);
+	//! The send rate limiter key of a request: its endpoint, bucket and whether it reads or writes. Empty for a
+	//! listing, whose concurrency the glob code already adapts to throttling.
+	static string SendRateKey(const string &endpoint, const string &bucket, S3RequestOperation operation);
 
 	static string ParseError(const string &error);
 	static HTTPException GetError(const S3AuthParams &s3_auth_params, const HTTPResponse &response,

@@ -20,6 +20,7 @@
 #include "duckdb/main/config.hpp"
 #include "duckdb/main/secret/secret_manager.hpp"
 #include "duckdb/main/settings.hpp"
+#include "duckdb/common/time_point.hpp"
 
 #include <algorithm>
 
@@ -717,11 +718,11 @@ static bool HasThrottlingErrorCode(const HTTPResponse &response) {
 // (CompleteMultipartUpload). One that is otherwise not sent again (CreateMultipartUpload) counts only the error
 // document: a bare 503, another error code or a body that is not an S3 error document does not show that the request
 // was refused, so it gets the single attempt it always had.
-static bool IsThrottledReceivedResponse(const S3RequestData &request_data, const HTTPResponse &response) {
+bool S3RequestUtil::IsThrottledResponse(S3RequestOperation operation, const HTTPResponse &response) {
 	if (response.HasRequestError()) {
 		return false;
 	}
-	auto &operation_info = S3RequestUtil::GetOperationInfo(request_data.operation);
+	auto &operation_info = GetOperationInfo(operation);
 	auto status = static_cast<int>(response.status);
 	if (operation_info.retry_throttled == S3ThrottleRetry::BY_ERROR_CODE) {
 		// A successful response is the operation's result, not a refusal
@@ -739,6 +740,34 @@ static bool IsThrottledReceivedResponse(const S3RequestData &request_data, const
 	return HasThrottlingErrorCode(response);
 }
 
+string S3RequestUtil::SendRateKey(const string &endpoint, const string &bucket, S3RequestOperation operation) {
+	switch (operation) {
+	case S3RequestOperation::LIST_OBJECTS:
+		return string();
+	case S3RequestOperation::HEAD_OBJECT:
+	case S3RequestOperation::GET_OBJECT:
+		return endpoint + "/" + bucket + " read";
+	default:
+		return endpoint + "/" + bucket + " write";
+	}
+}
+
+// The send rate of a request to the endpoint and bucket of its url, when s3_adaptive_send_rate is set
+static S3SendRate CreateSendRate(const S3RequestSpec &spec, const S3RequestData &request_data) {
+	auto &params = request_data.http_params->Cast<HTTPFSParams>();
+	if (!params.s3_adaptive_send_rate) {
+		return S3SendRate();
+	}
+	auto parsed_url = S3Url::Parse(spec.url, request_data.auth_params);
+	auto key = S3RequestUtil::SendRateKey(parsed_url.GetHost(), parsed_url.GetBucket(), spec.operation);
+	if (key.empty()) {
+		return S3SendRate();
+	}
+	auto limiter = params.http_util.Cast<HTTPFSUtil>().SendRateLimiters().Get(key, TimePoint::GetTickMs());
+	auto &snapshot = request_data.captured.snapshot->Cast<S3RequestSnapshot>();
+	return S3SendRate(std::move(limiter), spec.operation, snapshot.client_context);
+}
+
 S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequestSession &session,
                                        const S3RequestSpec &spec, const RequestCallback &request,
                                        const RefreshCallback &refresh_auth_params, const SetRegionCallback &set_region,
@@ -752,6 +781,11 @@ S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequ
 		// Only bounded auth/region corrections bypass transient retry admission.
 		for (;;) {
 			auto request_data = CreateRequestData(encryption_util, session.Capture(), spec, retry_budget);
+			// Per request, so that one sent again after a region redirect uses the limiter of its new endpoint. The
+			// first attempt waits here, before it takes one of the database's connections.
+			auto &send_rate = request_data.http_params->Cast<HTTPFSParams>().send_rate;
+			send_rate = CreateSendRate(spec, request_data);
+			send_rate.BeforeSend(true);
 			try {
 				auto response = request(request_data);
 				auto received_response = response && !response->HasRequestError();
@@ -769,7 +803,8 @@ S3RequestResult S3RequestExecutor::Run(EncryptionUtil &encryption_util, HTTPRequ
 				}
 				// A throttled request gets core's throttled retries: more of them, backed off further, and counted as
 				// throttled. Checked first, as it holds for operations that are otherwise not sent again.
-				const bool throttled = received_response && IsThrottledReceivedResponse(request_data, *response);
+				const bool throttled =
+				    received_response && S3RequestUtil::IsThrottledResponse(request_data.operation, *response);
 				string retry_after;
 				if (throttled && response->HasHeader("Retry-After")) {
 					retry_after = response->GetHeaderValue("Retry-After");
