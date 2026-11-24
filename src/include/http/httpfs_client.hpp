@@ -5,6 +5,7 @@
 #include "duckdb/common/unordered_map.hpp"
 #include "duckdb/logging/log_type.hpp"
 #include "http/httpfs_transport.hpp"
+#include "s3/s3_send_rate_limiter.hpp"
 
 namespace duckdb {
 
@@ -73,6 +74,10 @@ public:
 	string bearer_token;
 	bool unsafe_disable_etag_checks {false};
 	bool s3_version_id_pinning {false};
+	//! Once S3 throttles a bucket, space the requests sent to it (s3_adaptive_send_rate)
+	bool s3_adaptive_send_rate {false};
+	//! The send rate limiter of the S3 request these parameters were made for
+	S3SendRate send_rate;
 	//! Ignore response freshness when validation is disabled or legacy cache reuse is requested.
 	bool override_response_cache_policy {false};
 	shared_ptr<HTTPState> state;
@@ -103,8 +108,11 @@ public:
 	                                                        optional_ptr<FileOpenerInfo> info);
 	unique_ptr<HTTPClient> InitializeClient(HTTPParams &http_params, const string &proto_host_port) override;
 	void LogRequest(BaseRequest &request, optional_ptr<HTTPResponse> response) override;
-	//! S3's 400 RequestTimeout is retryable; core only knows the generic statuses.
+	//! S3's 400 RequestTimeout is retryable; core only knows the generic statuses. Also reports each response to the
+	//! request's send rate limiter.
 	bool ShouldRetry(const BaseRequest &request, const HTTPResponse &response) override;
+	//! Core's retries of an S3 request wait here for their turn at its send rate limiter.
+	void PrepareAttempt(BaseRequest &request, idx_t attempt, idx_t max_attempts) override;
 	HTTPTransportReusePolicy GetTransportReusePolicy() const override;
 
 	static HTTPUtil &GetHTTPUtil(optional_ptr<FileOpener> opener);
@@ -127,6 +135,10 @@ public:
 	//! A client's transport error, naming file descriptor exhaustion when that is what made it fail: the clients
 	//! report it as whatever step could not open its socket or file (a host lookup, a connection, memory).
 	static string DescribeRequestError(const string &client_error, int os_errno = 0);
+	//! The send rate limiters of the S3 buckets this provider sends to.
+	S3SendRateLimiters &SendRateLimiters() {
+		return send_rate_limiters;
+	}
 
 protected:
 	optional_ptr<DatabaseInstance> db;
@@ -148,6 +160,7 @@ private:
 	mutex certificate_lock;
 	//! Bundles read so far, by ca_cert_file setting (the empty string for the default locations).
 	unordered_map<string, shared_ptr<const string>> certificate_bundles;
+	S3SendRateLimiters send_rate_limiters;
 	//! Next non-recycled transport domain identity.
 	idx_t next_transport_reuse_domain DUCKDB_GUARDED_BY(transport_reuse_lock) = 1;
 };

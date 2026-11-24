@@ -271,6 +271,17 @@ void S3Settings::Register(DBConfig &config) {
 	                          LogicalType::BOOLEAN, Value(false), nullptr, SetScope::SESSION, false, true);
 	config.AddExtensionOption("s3_requester_pays", "S3 use requester pays mode", LogicalType::BOOLEAN, Value(false),
 	                          nullptr, SetScope::SESSION, false, true);
+	{
+		// Global only: the limiters are shared by the database's connections
+		ExtensionOption option(
+		    "Client-side, per-process rate limiter for S3 requests, like the AWS SDKs' adaptive retry mode: once "
+		    "S3 throttles requests to a bucket, space the requests sent to it at a rate that is cut at most once "
+		    "a second while S3 keeps throttling and grows back as requests succeed. Applies to files opened "
+		    "after it is set",
+		    LogicalType::BOOLEAN, nullptr, Value(false), SetScope::GLOBAL, false, false);
+		option.supports_session = false;
+		config.AddExtensionOption("s3_adaptive_send_rate", std::move(option));
+	}
 	config.AddExtensionOption("gcs_user_project", "GCS billing project for Requester Pays", LogicalType::VARCHAR,
 	                          Value(), nullptr, SetScope::SESSION, false, true);
 	config.AddExtensionOption(

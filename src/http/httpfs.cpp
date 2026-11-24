@@ -57,9 +57,15 @@ void HTTPFSUtil::LogRequest(BaseRequest &request, optional_ptr<HTTPResponse> res
 }
 
 bool HTTPFSUtil::ShouldRetry(const BaseRequest &request, const HTTPResponse &response) {
+	request.params.Cast<HTTPFSParams>().send_rate.OnResponse(response);
 	// S3 reports a timed-out request as 400 RequestTimeout: the status is final, the error code is not. Core judges
 	// statuses only, received or thrown by a handler; the error document is read here, by the S3 XML parser.
 	return HTTPUtil::ShouldRetry(request, response) || S3RequestUtil::IsRequestTimeout(response);
+}
+
+void HTTPFSUtil::PrepareAttempt(BaseRequest &request, idx_t attempt, idx_t max_attempts) {
+	HTTPUtil::PrepareAttempt(request, attempt, max_attempts);
+	request.params.Cast<HTTPFSParams>().send_rate.BeforeSend();
 }
 
 struct HTTPParametersInitializer {
@@ -109,6 +115,7 @@ private:
 		FileOpener::TryGetCurrentSetting(opener, "unsafe_disable_etag_checks", result->unsafe_disable_etag_checks,
 		                                 info);
 		FileOpener::TryGetCurrentSetting(opener, "s3_version_id_pinning", result->s3_version_id_pinning, info);
+		FileOpener::TryGetCurrentSetting(opener, "s3_adaptive_send_rate", result->s3_adaptive_send_rate, info);
 		auto context = FileOpener::TryGetClientContext(opener);
 		Value external_cache_enabled;
 		if (context &&
